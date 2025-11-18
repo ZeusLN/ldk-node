@@ -40,8 +40,9 @@ jobs:
         run: |
           version=$(cargo metadata --no-deps --format-version 1 --manifest-path ldk-node/Cargo.toml | jq -r '.packages[] | select(.name == "ldk-node") | .version')
           cd vss-server
-          # The 0.7 tests use fixed headers without authentication.
-          if [[ "$version" == 0.7.* ]]; then
+          # The 0.7 tests use fixed headers without authentication. The Zeus fork keeps
+          # those tests while versioning its API as 0.8.0+git.
+          if [[ "$version" == 0.7.* || "$version" == 0.8.0+git ]]; then
             RUSTFLAGS="--cfg noop_authorizer" cargo run --no-default-features server/vss-server-config.toml&
           else
             cargo run server/vss-server-config.toml&
