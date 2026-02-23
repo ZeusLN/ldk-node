@@ -38,6 +38,9 @@ pub use lightning_liquidity::lsps0::ser::LSPSDateTime;
 pub use lightning_liquidity::lsps1::msgs::{
 	LSPS1ChannelInfo, LSPS1OrderId, LSPS1OrderParams, LSPS1PaymentState,
 };
+pub use lightning_liquidity::lsps7::msgs::{
+	LSPS7ExtendableChannel, LSPS7OrderId, LSPS7OrderState, LSPS7OriginalOrder,
+};
 pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning_types::string::UntrustedString;
 pub use vss_client::headers::{VssHeaderProvider, VssHeaderProviderError};
@@ -50,7 +53,7 @@ pub use crate::config::{
 pub use crate::entropy::{generate_entropy_mnemonic, EntropyError, NodeEntropy, WordCount};
 use crate::error::Error;
 pub use crate::graph::{ChannelInfo, ChannelUpdateInfo, NodeAnnouncementInfo, NodeInfo};
-pub use crate::liquidity::{LSPS1OrderStatus, LSPS2ServiceConfig};
+pub use crate::liquidity::{LSPS1OrderStatus, LSPS2ServiceConfig, LSPS7OrderResponse};
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
 pub use crate::payment::store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
