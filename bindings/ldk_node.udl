@@ -103,6 +103,7 @@ interface Builder {
 	void set_pathfinding_scores_source(string url);
 	void set_liquidity_source_lsps1(PublicKey node_id, SocketAddress address, string? token);
 	void set_liquidity_source_lsps2(PublicKey node_id, SocketAddress address, string? token);
+	void set_liquidity_source_lsps7(PublicKey node_id, SocketAddress address, string? token);
 	void set_storage_dir_path(string storage_dir_path);
 	void set_filesystem_logger(string? log_file_path, LogLevel? max_log_level);
 	void set_log_facade_logger();
@@ -151,6 +152,7 @@ interface Node {
 	OnchainPayment onchain_payment();
 	UnifiedQrPayment unified_qr_payment();
 	LSPS1Liquidity lsps1_liquidity();
+	LSPS7Liquidity lsps7_liquidity();
 	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
 	[Throws=NodeError]
@@ -287,6 +289,15 @@ interface LSPS1Liquidity {
 	LSPS1OrderStatus request_channel(u64 lsp_balance_sat, u64 client_balance_sat, u32 channel_expiry_blocks, boolean announce_channel);
 	[Throws=NodeError]
 	LSPS1OrderStatus check_order_status(LSPS1OrderId order_id);
+};
+
+interface LSPS7Liquidity {
+	[Throws=NodeError]
+	sequence<LSPS7ExtendableChannel> get_extendable_channels();
+	[Throws=NodeError]
+	LSPS7OrderResponse create_order(string short_channel_id, u32 channel_extension_expiry_blocks, string? token, string? refund_onchain_address);
+	[Throws=NodeError]
+	LSPS7OrderResponse check_order_status(string order_id);
 };
 
 [Error]
@@ -557,6 +568,34 @@ enum LSPS1PaymentState {
 	"ExpectPayment",
 	"Paid",
 	"Refunded",
+};
+
+dictionary LSPS7OrderResponse {
+	LSPS7OrderId order_id;
+	LSPS7OrderState order_state;
+	u32 channel_extension_expiry_blocks;
+	u32 new_channel_expiry_block;
+	LSPS1PaymentInfo payment;
+	LSPS7ExtendableChannel channel;
+};
+
+dictionary LSPS7ExtendableChannel {
+	LSPS7OriginalOrder? original_order;
+	sequence<string>? extension_order_ids;
+	string short_channel_id;
+	u32 max_channel_extension_expiry_blocks;
+	u32 expiration_block;
+};
+
+dictionary LSPS7OriginalOrder {
+	string id;
+	string service;
+};
+
+enum LSPS7OrderState {
+	"Created",
+	"Completed",
+	"Failed",
 };
 
 [NonExhaustive]
@@ -900,6 +939,9 @@ typedef string NodeAlias;
 
 [Custom]
 typedef string LSPS1OrderId;
+
+[Custom]
+typedef string LSPS7OrderId;
 
 [Custom]
 typedef string LSPSDateTime;
