@@ -1172,6 +1172,18 @@ impl UniffiCustomTypeConverter for LSPS1OrderId {
 	}
 }
 
+impl UniffiCustomTypeConverter for LSPS7OrderId {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		Ok(Self(val))
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.0
+	}
+}
+
 impl UniffiCustomTypeConverter for LSPSDateTime {
 	type Builtin = String;
 
