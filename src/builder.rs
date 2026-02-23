@@ -61,7 +61,8 @@ use crate::io::{
 	self, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::liquidity::{
-	LSPS1ClientConfig, LSPS2ClientConfig, LSPS2ServiceConfig, LiquiditySourceBuilder,
+	LSPS1ClientConfig, LSPS2ClientConfig, LSPS2ServiceConfig, LSPS7ClientConfig,
+	LiquiditySourceBuilder,
 };
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
@@ -119,6 +120,8 @@ struct LiquiditySourceConfig {
 	lsps2_client: Option<LSPS2ClientConfig>,
 	// Act as an LSPS2 service.
 	lsps2_service: Option<LSPS2ServiceConfig>,
+	// Act as an LSPS7 client connecting to the given service.
+	lsps7_client: Option<LSPS7ClientConfig>,
 }
 
 #[derive(Clone)]
@@ -426,6 +429,22 @@ impl NodeBuilder {
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
 		let lsps2_client_config = LSPS2ClientConfig { node_id, address, token };
 		liquidity_source_config.lsps2_client = Some(lsps2_client_config);
+		self
+	}
+
+	/// Configures the [`Node`] instance to source channel lease extensions from the given
+	/// [bLIP-57 / LSPS7] service.
+	///
+	/// The given `token` will be used by the LSP to authenticate the user.
+	///
+	/// [bLIP-57 / LSPS7]: https://github.com/lightning/blips/blob/master/blip-0057.md
+	pub fn set_liquidity_source_lsps7(
+		&mut self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
+	) -> &mut Self {
+		let liquidity_source_config =
+			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
+		let lsps7_client_config = LSPS7ClientConfig { node_id, address, token };
+		liquidity_source_config.lsps7_client = Some(lsps7_client_config);
 		self
 	}
 
@@ -1528,6 +1547,14 @@ fn build_with_store_internal(
 
 			lsc.lsps2_client.as_ref().map(|config| {
 				liquidity_source_builder.lsps2_client(
+					config.node_id,
+					config.address.clone(),
+					config.token.clone(),
+				)
+			});
+
+			lsc.lsps7_client.as_ref().map(|config| {
+				liquidity_source_builder.lsps7_client(
 					config.node_id,
 					config.address.clone(),
 					config.token.clone(),
