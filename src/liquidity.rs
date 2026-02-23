@@ -29,6 +29,9 @@ use lightning_liquidity::lsps1::event::LSPS1ClientEvent;
 use lightning_liquidity::lsps1::msgs::{
 	LSPS1ChannelInfo, LSPS1Options, LSPS1OrderId, LSPS1OrderParams,
 };
+use lightning_liquidity::lsps7::client::LSPS7ClientConfig as LdkLSPS7ClientConfig;
+use lightning_liquidity::lsps7::event::LSPS7ClientEvent;
+use lightning_liquidity::lsps7::msgs::{LSPS7ExtendableChannel, LSPS7OrderId, LSPS7OrderState};
 use lightning_liquidity::lsps2::client::LSPS2ClientConfig as LdkLSPS2ClientConfig;
 use lightning_liquidity::lsps2::event::{LSPS2ClientEvent, LSPS2ServiceEvent};
 use lightning_liquidity::lsps2::msgs::{LSPS2OpeningFeeParams, LSPS2RawOpeningFeeParams};
@@ -84,6 +87,26 @@ struct LSPS2Client {
 
 #[derive(Debug, Clone)]
 pub(crate) struct LSPS2ClientConfig {
+	pub node_id: PublicKey,
+	pub address: SocketAddress,
+	pub token: Option<String>,
+}
+
+struct LSPS7Client {
+	lsp_node_id: PublicKey,
+	lsp_address: SocketAddress,
+	token: Option<String>,
+	ldk_client_config: LdkLSPS7ClientConfig,
+	pending_get_extendable_channels_requests:
+		Mutex<HashMap<LSPSRequestId, oneshot::Sender<Vec<LSPS7ExtendableChannel>>>>,
+	pending_create_order_requests:
+		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS7OrderResponse>>>,
+	pending_check_order_status_requests:
+		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS7OrderResponse>>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LSPS7ClientConfig {
 	pub node_id: PublicKey,
 	pub address: SocketAddress,
 	pub token: Option<String>,
@@ -152,6 +175,7 @@ where
 	lsps1_client: Option<LSPS1Client>,
 	lsps2_client: Option<LSPS2Client>,
 	lsps2_service: Option<LSPS2Service>,
+	lsps7_client: Option<LSPS7Client>,
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
@@ -174,10 +198,12 @@ where
 		let lsps1_client = None;
 		let lsps2_client = None;
 		let lsps2_service = None;
+		let lsps7_client = None;
 		Self {
 			lsps1_client,
 			lsps2_client,
 			lsps2_service,
+			lsps7_client,
 			wallet,
 			channel_manager,
 			keys_manager,
@@ -234,6 +260,25 @@ where
 		self
 	}
 
+	pub(crate) fn lsps7_client(
+		&mut self, lsp_node_id: PublicKey, lsp_address: SocketAddress, token: Option<String>,
+	) -> &mut Self {
+		let ldk_client_config = LdkLSPS7ClientConfig {};
+		let pending_get_extendable_channels_requests = Mutex::new(HashMap::new());
+		let pending_create_order_requests = Mutex::new(HashMap::new());
+		let pending_check_order_status_requests = Mutex::new(HashMap::new());
+		self.lsps7_client = Some(LSPS7Client {
+			lsp_node_id,
+			lsp_address,
+			token,
+			ldk_client_config,
+			pending_get_extendable_channels_requests,
+			pending_create_order_requests,
+			pending_check_order_status_requests,
+		});
+		self
+	}
+
 	pub(crate) async fn build(self) -> Result<LiquiditySource<L>, BuildError> {
 		let liquidity_service_config = self.lsps2_service.as_ref().map(|s| {
 			let lsps2_service_config = Some(s.ldk_service_config.clone());
@@ -245,10 +290,12 @@ where
 		let lsps1_client_config = self.lsps1_client.as_ref().map(|s| s.ldk_client_config.clone());
 		let lsps2_client_config = self.lsps2_client.as_ref().map(|s| s.ldk_client_config.clone());
 		let lsps5_client_config = None;
+		let lsps7_client_config = self.lsps7_client.as_ref().map(|s| s.ldk_client_config.clone());
 		let liquidity_client_config = Some(LiquidityClientConfig {
 			lsps1_client_config,
 			lsps2_client_config,
 			lsps5_client_config,
+			lsps7_client_config,
 		});
 
 		let liquidity_manager = Arc::new(
@@ -271,6 +318,7 @@ where
 			lsps1_client: self.lsps1_client,
 			lsps2_client: self.lsps2_client,
 			lsps2_service: self.lsps2_service,
+			lsps7_client: self.lsps7_client,
 			wallet: self.wallet,
 			channel_manager: self.channel_manager,
 			peer_manager: RwLock::new(None),
@@ -289,6 +337,7 @@ where
 	lsps1_client: Option<LSPS1Client>,
 	lsps2_client: Option<LSPS2Client>,
 	lsps2_service: Option<LSPS2Service>,
+	lsps7_client: Option<LSPS7Client>,
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
 	peer_manager: RwLock<Option<Arc<PeerManager>>>,
@@ -316,6 +365,10 @@ where
 
 	pub(crate) fn get_lsps2_lsp_details(&self) -> Option<(PublicKey, SocketAddress)> {
 		self.lsps2_client.as_ref().map(|s| (s.lsp_node_id, s.lsp_address.clone()))
+	}
+
+	pub(crate) fn get_lsps7_lsp_details(&self) -> Option<(PublicKey, SocketAddress)> {
+		self.lsps7_client.as_ref().map(|s| (s.lsp_node_id, s.lsp_address.clone()))
 	}
 
 	pub(crate) fn lsps2_channel_needs_manual_broadcast(
@@ -910,6 +963,233 @@ where
 					);
 				}
 			},
+			LiquidityEvent::LSPS7Client(LSPS7ClientEvent::ExtendableChannelsReady {
+				request_id,
+				counterparty_node_id,
+				extendable_channels,
+			}) => {
+				if let Some(lsps7_client) = self.lsps7_client.as_ref() {
+					if counterparty_node_id != lsps7_client.lsp_node_id {
+						debug_assert!(
+							false,
+							"Received response from unexpected LSP counterparty. This should never happen."
+						);
+						log_error!(
+							self.logger,
+							"Received response from unexpected LSP counterparty. This should never happen."
+						);
+						return;
+					}
+
+					if let Some(sender) = lsps7_client
+						.pending_get_extendable_channels_requests
+						.lock()
+						.unwrap()
+						.remove(&request_id)
+					{
+						match sender.send(extendable_channels) {
+							Ok(()) => (),
+							Err(_) => {
+								log_error!(
+									self.logger,
+									"Failed to handle response for request {:?} from liquidity service",
+									request_id
+								);
+							},
+						}
+					} else {
+						debug_assert!(
+							false,
+							"Received response from liquidity service for unknown request."
+						);
+						log_error!(
+							self.logger,
+							"Received response from liquidity service for unknown request."
+						);
+					}
+				} else {
+					log_error!(
+						self.logger,
+						"Received unexpected LSPS7Client::ExtendableChannelsReady event!"
+					);
+				}
+			},
+			LiquidityEvent::LSPS7Client(LSPS7ClientEvent::ExtendableChannelsRequestFailed {
+				request_id,
+				counterparty_node_id,
+				error,
+			}) => {
+				log_error!(
+					self.logger,
+					"LSPS7 get extendable channels request {:?} from {} failed: {:?}",
+					request_id,
+					counterparty_node_id,
+					error
+				);
+				if let Some(lsps7_client) = self.lsps7_client.as_ref() {
+					lsps7_client
+						.pending_get_extendable_channels_requests
+						.lock()
+						.unwrap()
+						.remove(&request_id);
+				}
+			},
+			LiquidityEvent::LSPS7Client(LSPS7ClientEvent::OrderCreated {
+				request_id,
+				counterparty_node_id,
+				order_id,
+				order_state,
+				channel_extension_expiry_blocks,
+				new_channel_expiry_block,
+				payment,
+				channel,
+			}) => {
+				if let Some(lsps7_client) = self.lsps7_client.as_ref() {
+					if counterparty_node_id != lsps7_client.lsp_node_id {
+						debug_assert!(
+							false,
+							"Received response from unexpected LSP counterparty. This should never happen."
+						);
+						log_error!(
+							self.logger,
+							"Received response from unexpected LSP counterparty. This should never happen."
+						);
+						return;
+					}
+
+					if let Some(sender) = lsps7_client
+						.pending_create_order_requests
+						.lock()
+						.unwrap()
+						.remove(&request_id)
+					{
+						let response = LSPS7OrderResponse {
+							order_id,
+							order_state,
+							channel_extension_expiry_blocks,
+							new_channel_expiry_block,
+							payment: payment.into(),
+							channel,
+						};
+
+						match sender.send(response) {
+							Ok(()) => (),
+							Err(_) => {
+								log_error!(
+									self.logger,
+									"Failed to handle response for request {:?} from liquidity service",
+									request_id
+								);
+							},
+						}
+					} else {
+						debug_assert!(
+							false,
+							"Received response from liquidity service for unknown request."
+						);
+						log_error!(
+							self.logger,
+							"Received response from liquidity service for unknown request."
+						);
+					}
+				} else {
+					log_error!(
+						self.logger,
+						"Received unexpected LSPS7Client::OrderCreated event!"
+					);
+				}
+			},
+			LiquidityEvent::LSPS7Client(LSPS7ClientEvent::OrderStatus {
+				request_id,
+				counterparty_node_id,
+				order_id,
+				order_state,
+				channel_extension_expiry_blocks,
+				new_channel_expiry_block,
+				payment,
+				channel,
+			}) => {
+				if let Some(lsps7_client) = self.lsps7_client.as_ref() {
+					if counterparty_node_id != lsps7_client.lsp_node_id {
+						debug_assert!(
+							false,
+							"Received response from unexpected LSP counterparty. This should never happen."
+						);
+						log_error!(
+							self.logger,
+							"Received response from unexpected LSP counterparty. This should never happen."
+						);
+						return;
+					}
+
+					if let Some(sender) = lsps7_client
+						.pending_check_order_status_requests
+						.lock()
+						.unwrap()
+						.remove(&request_id)
+					{
+						let response = LSPS7OrderResponse {
+							order_id,
+							order_state,
+							channel_extension_expiry_blocks,
+							new_channel_expiry_block,
+							payment: payment.into(),
+							channel,
+						};
+
+						match sender.send(response) {
+							Ok(()) => (),
+							Err(_) => {
+								log_error!(
+									self.logger,
+									"Failed to handle response for request {:?} from liquidity service",
+									request_id
+								);
+							},
+						}
+					} else {
+						debug_assert!(
+							false,
+							"Received response from liquidity service for unknown request."
+						);
+						log_error!(
+							self.logger,
+							"Received response from liquidity service for unknown request."
+						);
+					}
+				} else {
+					log_error!(
+						self.logger,
+						"Received unexpected LSPS7Client::OrderStatus event!"
+					);
+				}
+			},
+			LiquidityEvent::LSPS7Client(LSPS7ClientEvent::OrderRequestFailed {
+				request_id,
+				counterparty_node_id,
+				error,
+			}) => {
+				log_error!(
+					self.logger,
+					"LSPS7 order request {:?} from {} failed: {:?}",
+					request_id,
+					counterparty_node_id,
+					error
+				);
+				if let Some(lsps7_client) = self.lsps7_client.as_ref() {
+					// Could be either create or check - remove from both
+					lsps7_client
+						.pending_create_order_requests
+						.lock()
+						.unwrap()
+						.remove(&request_id);
+					lsps7_client
+						.pending_check_order_status_requests
+						.lock()
+						.unwrap()
+						.remove(&request_id);
+				}
+			},
 			e => {
 				log_error!(self.logger, "Received unexpected liquidity event: {:?}", e);
 			},
@@ -1078,6 +1358,115 @@ where
 		})?;
 
 		Ok(response)
+	}
+
+	pub(crate) async fn lsps7_get_extendable_channels(
+		&self,
+	) -> Result<Vec<LSPS7ExtendableChannel>, Error> {
+		let lsps7_client = self.lsps7_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let client_handler = self.liquidity_manager.lsps7_client_handler().ok_or_else(|| {
+			log_error!(self.logger, "LSPS7 liquidity client was not configured.",);
+			Error::LiquiditySourceUnavailable
+		})?;
+
+		let (request_sender, request_receiver) = oneshot::channel();
+		{
+			let mut pending_requests_lock =
+				lsps7_client.pending_get_extendable_channels_requests.lock().unwrap();
+			let request_id =
+				client_handler.request_extendable_channels(lsps7_client.lsp_node_id);
+			pending_requests_lock.insert(request_id, request_sender);
+		}
+
+		tokio::time::timeout(Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS), request_receiver)
+			.await
+			.map_err(|e| {
+				log_error!(self.logger, "Liquidity request timed out: {}", e);
+				Error::LiquidityRequestFailed
+			})?
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to handle response from liquidity service: {}",
+					e
+				);
+				Error::LiquidityRequestFailed
+			})
+	}
+
+	pub(crate) async fn lsps7_create_order(
+		&self, short_channel_id: String, channel_extension_expiry_blocks: u32,
+		token: Option<String>, refund_onchain_address: Option<bitcoin::Address>,
+	) -> Result<LSPS7OrderResponse, Error> {
+		let lsps7_client = self.lsps7_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let client_handler = self.liquidity_manager.lsps7_client_handler().ok_or_else(|| {
+			log_error!(self.logger, "LSPS7 liquidity client was not configured.",);
+			Error::LiquiditySourceUnavailable
+		})?;
+
+		let (request_sender, request_receiver) = oneshot::channel();
+		let request_id;
+		{
+			let mut pending_requests_lock =
+				lsps7_client.pending_create_order_requests.lock().unwrap();
+			request_id = client_handler.create_order(
+				&lsps7_client.lsp_node_id,
+				short_channel_id,
+				channel_extension_expiry_blocks,
+				token.or_else(|| lsps7_client.token.clone()),
+				refund_onchain_address,
+			);
+			pending_requests_lock.insert(request_id.clone(), request_sender);
+		}
+
+		tokio::time::timeout(
+			Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS),
+			request_receiver,
+		)
+		.await
+		.map_err(|e| {
+			log_error!(self.logger, "Liquidity request with ID {:?} timed out: {}", request_id, e);
+			Error::LiquidityRequestFailed
+		})?
+		.map_err(|e| {
+			log_error!(self.logger, "Failed to handle response from liquidity service: {}", e);
+			Error::LiquidityRequestFailed
+		})
+	}
+
+	pub(crate) async fn lsps7_check_order_status(
+		&self, order_id: LSPS7OrderId,
+	) -> Result<LSPS7OrderResponse, Error> {
+		let lsps7_client = self.lsps7_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+		let client_handler = self.liquidity_manager.lsps7_client_handler().ok_or_else(|| {
+			log_error!(self.logger, "LSPS7 liquidity client was not configured.",);
+			Error::LiquiditySourceUnavailable
+		})?;
+
+		let (request_sender, request_receiver) = oneshot::channel();
+		{
+			let mut pending_requests_lock =
+				lsps7_client.pending_check_order_status_requests.lock().unwrap();
+			let request_id =
+				client_handler.check_order_status(&lsps7_client.lsp_node_id, order_id);
+			pending_requests_lock.insert(request_id, request_sender);
+		}
+
+		tokio::time::timeout(
+			Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS),
+			request_receiver,
+		)
+		.await
+		.map_err(|e| {
+			log_error!(self.logger, "Liquidity request timed out: {}", e);
+			Error::LiquidityRequestFailed
+		})?
+		.map_err(|e| {
+			log_error!(self.logger, "Failed to handle response from liquidity service: {}", e);
+			Error::LiquidityRequestFailed
+		})
 	}
 
 	pub(crate) async fn lsps2_receive_to_jit_channel(
@@ -1537,6 +1926,149 @@ impl LSPS1Liquidity {
 		let response = self
 			.runtime
 			.block_on(async move { liquidity_source.lsps1_check_order_status(order_id).await })?;
+		Ok(response)
+	}
+}
+
+/// Represents the response to an LSPS7 channel lease extension order.
+#[derive(Debug, Clone)]
+pub struct LSPS7OrderResponse {
+	/// The id of the extension order.
+	pub order_id: LSPS7OrderId,
+	/// The current state of the order.
+	pub order_state: LSPS7OrderState,
+	/// The number of blocks the channel lease will be extended by.
+	pub channel_extension_expiry_blocks: u32,
+	/// The new expiry block for the channel after extension.
+	pub new_channel_expiry_block: u32,
+	/// Contains details about how to pay for the order.
+	pub payment: LSPS1PaymentInfo,
+	/// The channel being extended.
+	pub channel: LSPS7ExtendableChannel,
+}
+
+/// A liquidity handler allowing to extend channel leases via the [bLIP-57 / LSPS7] protocol.
+///
+/// Should be retrieved by calling [`Node::lsps7_liquidity`].
+///
+/// [bLIP-57 / LSPS7]: https://github.com/lightning/blips/blob/master/blip-0057.md
+/// [`Node::lsps7_liquidity`]: crate::Node::lsps7_liquidity
+#[derive(Clone)]
+pub struct LSPS7Liquidity {
+	runtime: Arc<Runtime>,
+	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
+	logger: Arc<Logger>,
+}
+
+impl LSPS7Liquidity {
+	pub(crate) fn new(
+		runtime: Arc<Runtime>, connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>, logger: Arc<Logger>,
+	) -> Self {
+		Self { runtime, connection_manager, liquidity_source, logger }
+	}
+
+	/// Connects to the configured LSP and retrieves the list of channels eligible for lease
+	/// extension.
+	pub fn get_extendable_channels(&self) -> Result<Vec<LSPS7ExtendableChannel>, Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let (lsp_node_id, lsp_address) =
+			liquidity_source.get_lsps7_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let con_node_id = lsp_node_id;
+		let con_addr = lsp_address.clone();
+		let con_cm = Arc::clone(&self.connection_manager);
+
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
+		})?;
+
+		log_info!(self.logger, "Connected to LSP {}@{}. ", lsp_node_id, lsp_address);
+
+		let liquidity_source = Arc::clone(&liquidity_source);
+		let response = self.runtime.block_on(async move {
+			liquidity_source.lsps7_get_extendable_channels().await
+		})?;
+
+		Ok(response)
+	}
+
+	/// Connects to the configured LSP and places an order to extend the lease on a channel.
+	///
+	/// The channel will be extended after one of the returned payment options has successfully
+	/// been paid.
+	pub fn create_order(
+		&self, short_channel_id: String, channel_extension_expiry_blocks: u32,
+		token: Option<String>, refund_onchain_address: Option<String>,
+	) -> Result<LSPS7OrderResponse, Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let (lsp_node_id, lsp_address) =
+			liquidity_source.get_lsps7_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let con_node_id = lsp_node_id;
+		let con_addr = lsp_address.clone();
+		let con_cm = Arc::clone(&self.connection_manager);
+
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
+		})?;
+
+		log_info!(self.logger, "Connected to LSP {}@{}. ", lsp_node_id, lsp_address);
+
+		let refund_address = refund_onchain_address
+			.map(|addr| {
+				addr.parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+					.map_err(|e| {
+						log_error!(self.logger, "Invalid refund onchain address: {:?}", e);
+						Error::InvalidAddress
+					})
+					.map(|a| a.assume_checked())
+			})
+			.transpose()?;
+
+		let liquidity_source = Arc::clone(&liquidity_source);
+		let response = self.runtime.block_on(async move {
+			liquidity_source
+				.lsps7_create_order(
+					short_channel_id,
+					channel_extension_expiry_blocks,
+					token,
+					refund_address,
+				)
+				.await
+		})?;
+
+		Ok(response)
+	}
+
+	/// Connects to the configured LSP and checks for the status of a previously-placed
+	/// extension order.
+	pub fn check_order_status(&self, order_id: String) -> Result<LSPS7OrderResponse, Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let (lsp_node_id, lsp_address) =
+			liquidity_source.get_lsps7_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let con_node_id = lsp_node_id;
+		let con_addr = lsp_address.clone();
+		let con_cm = Arc::clone(&self.connection_manager);
+
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
+		})?;
+
+		let liquidity_source = Arc::clone(&liquidity_source);
+		let response = self.runtime.block_on(async move {
+			liquidity_source
+				.lsps7_check_order_status(LSPS7OrderId(order_id))
+				.await
+		})?;
 		Ok(response)
 	}
 }
