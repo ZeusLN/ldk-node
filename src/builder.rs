@@ -854,6 +854,18 @@ impl ArcedNodeBuilder {
 		self.inner.write().unwrap().set_liquidity_source_lsps2(node_id, address, token);
 	}
 
+	/// Configures the [`Node`] instance to source channel lease extensions from the given
+	/// [bLIP-57 / LSPS7] service.
+	///
+	/// The given `token` will be used by the LSP to authenticate the user.
+	///
+	/// [bLIP-57 / LSPS7]: https://github.com/lightning/blips/blob/master/blip-0057.md
+	pub fn set_liquidity_source_lsps7(
+		&self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
+	) {
+		self.inner.write().unwrap().set_liquidity_source_lsps7(node_id, address, token);
+	}
+
 	/// Configures the [`Node`] instance to provide an [LSPS2] service, issuing just-in-time
 	/// channels to clients.
 	///
