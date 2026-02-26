@@ -1748,6 +1748,37 @@ impl Node {
 		Arc::new(NetworkGraph::new(Arc::clone(&self.network_graph)))
 	}
 
+	/// Resets the network graph by clearing all channels and nodes, and resets the RGS
+	/// sync timestamp so the next sync fetches the full snapshot.
+	///
+	/// This is useful for troubleshooting when the graph appears sparse or corrupted.
+	/// After calling this, either restart the node or wait up to one hour for the
+	/// background RGS sync to repopulate the graph.
+	pub fn reset_network_graph(&self) -> Result<(), Error> {
+		// Reset the in-memory RGS timestamp so the next background tick fetches from 0
+		self.gossip_source.reset_rgs_timestamp();
+
+		// Reset the persisted RGS timestamp
+		{
+			let mut locked_node_metrics = self.node_metrics.write().unwrap();
+			locked_node_metrics.latest_rgs_snapshot_timestamp = None;
+			write_node_metrics(
+				&*locked_node_metrics,
+				Arc::clone(&self.kv_store),
+				Arc::clone(&self.logger),
+			)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed writing node metrics: {}", e);
+				e
+			})?;
+		}
+
+		// Clear the in-memory graph by marking all channels as stale
+		self.network_graph.remove_stale_channels_and_tracking_with_time(u64::MAX);
+
+		Ok(())
+	}
+
 	/// Creates a digital ECDSA signature of a message with the node's secret key.
 	///
 	/// A receiver knowing the corresponding `PublicKey` (e.g. the node’s id) and the message
