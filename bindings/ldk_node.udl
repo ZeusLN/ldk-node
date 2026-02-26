@@ -183,6 +183,8 @@ interface Node {
 	NetworkGraph network_graph();
 	[Throws=NodeError]
 	void reset_network_graph();
+	[Throws=NodeError]
+	u32 update_rgs_snapshot();
 	string sign_message([ByRef]sequence<u8> msg);
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
 	[Throws=NodeError]
