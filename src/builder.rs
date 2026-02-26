@@ -64,7 +64,7 @@ use crate::liquidity::{
 	LSPS1ClientConfig, LSPS2ClientConfig, LSPS2ServiceConfig, LSPS7ClientConfig,
 	LiquiditySourceBuilder,
 };
-use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
+use crate::logger::{log_error, log_info, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::peer_store::PeerStore;
@@ -1525,8 +1525,25 @@ fn build_with_store_internal(
 			p2p_source
 		},
 		GossipSourceConfig::RapidGossipSync(rgs_server) => {
-			let latest_sync_timestamp =
+			let stored_timestamp =
 				node_metrics.read().unwrap().latest_rgs_snapshot_timestamp.unwrap_or(0);
+			let graph_channel_count = network_graph.read_only().channels().len();
+
+			// If the graph is sparse but we have a stored timestamp, force a full sync
+			// from timestamp 0. This handles cases where the graph failed to persist
+			// (e.g., VSS size limits) but the RGS timestamp was saved successfully.
+			let latest_sync_timestamp = if stored_timestamp > 0 && graph_channel_count < 1000 {
+				log_info!(
+					logger,
+					"Network graph has only {} channels but RGS timestamp is {}. Forcing full RGS sync.",
+					graph_channel_count,
+					stored_timestamp
+				);
+				0
+			} else {
+				stored_timestamp
+			};
+
 			Arc::new(GossipSource::new_rgs(
 				rgs_server.clone(),
 				latest_sync_timestamp,
