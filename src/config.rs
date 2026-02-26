@@ -91,7 +91,8 @@ pub(crate) const FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 5;
 pub(crate) const TX_BROADCAST_TIMEOUT_SECS: u64 = 5;
 
 // The timeout after which we abort a RGS sync operation.
-pub(crate) const RGS_SYNC_TIMEOUT_SECS: u64 = 5;
+// Increased from upstream default of 5s to accommodate mobile network conditions.
+pub(crate) const RGS_SYNC_TIMEOUT_SECS: u64 = 30;
 
 /// The length in bytes of our wallets' keys seed.
 pub const WALLET_KEYS_SEED_LEN: usize = 64;
