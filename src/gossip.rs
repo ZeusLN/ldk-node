@@ -55,6 +55,13 @@ impl GossipSource {
 		matches!(self, Self::RapidGossipSync { .. })
 	}
 
+	/// Reset the in-memory RGS sync timestamp to 0 so the next sync fetches the full snapshot.
+	pub(crate) fn reset_rgs_timestamp(&self) {
+		if let Self::RapidGossipSync { latest_sync_timestamp, .. } = self {
+			latest_sync_timestamp.store(0, Ordering::Release);
+		}
+	}
+
 	pub fn as_gossip_sync(&self) -> GossipSync {
 		match self {
 			Self::RapidGossipSync { gossip_sync, .. } => GossipSync::Rapid(Arc::clone(gossip_sync)),
