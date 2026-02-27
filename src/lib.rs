@@ -83,6 +83,8 @@
 mod balance;
 mod builder;
 mod chain;
+/// Closed channel tracking and persistence.
+pub mod closed_channel;
 pub mod config;
 mod connection;
 mod data_store;
@@ -112,6 +114,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
+pub use closed_channel::ClosedChannelDetails;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Amount};
 #[cfg(feature = "uniffi")]
@@ -158,8 +161,9 @@ use peer_store::{PeerInfo, PeerStore};
 use rand::Rng;
 use runtime::Runtime;
 use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
-	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, ClosedChannelStore,
+	DynStore, Graph, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer,
+	Sweeper, Wallet,
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
 pub use {
@@ -202,6 +206,7 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	closed_channel_store: Arc<ClosedChannelStore>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
@@ -551,6 +556,7 @@ impl Node {
 			self.liquidity_source.clone(),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
+			Arc::clone(&self.closed_channel_store),
 			static_invoice_store,
 			Arc::clone(&self.onion_messenger),
 			self.om_mailbox.clone(),
@@ -1035,6 +1041,11 @@ impl Node {
 	/// Retrieve a list of known channels.
 	pub fn list_channels(&self) -> Vec<ChannelDetails> {
 		self.channel_manager.list_channels().into_iter().map(|c| c.into()).collect()
+	}
+
+	/// Retrieve a list of closed channels.
+	pub fn list_closed_channels(&self) -> Vec<ClosedChannelDetails> {
+		self.closed_channel_store.list_filter(|_| true)
 	}
 
 	/// Connect to a node on the peer-to-peer network.

@@ -74,6 +74,10 @@ pub(crate) const BDK_WALLET_INDEXER_PRIMARY_NAMESPACE: &str = "bdk_wallet";
 pub(crate) const BDK_WALLET_INDEXER_SECONDARY_NAMESPACE: &str = "";
 pub(crate) const BDK_WALLET_INDEXER_KEY: &str = "indexer";
 
+/// The closed channel information will be persisted under this prefix.
+pub(crate) const CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE: &str = "closed_channels";
+pub(crate) const CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
+
 /// [`StaticInvoice`]s will be persisted under this key.
 ///
 /// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
