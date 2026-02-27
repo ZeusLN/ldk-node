@@ -16,6 +16,8 @@ use lightning::util::ser::LengthLimitedRead;
 use lightning_liquidity::lsps0::ser::RawLSPSMessage;
 use lightning_types::features::{InitFeatures, NodeFeatures};
 
+pub(crate) use lightning::log_error;
+
 use crate::liquidity::LiquiditySource;
 
 pub(crate) enum NodeCustomMessageHandler<L: Deref>
@@ -23,15 +25,15 @@ where
 	L::Target: Logger,
 {
 	Ignoring,
-	Liquidity { liquidity_source: Arc<LiquiditySource<L>> },
+	Liquidity { liquidity_source: Arc<LiquiditySource<L>>, logger: L },
 }
 
 impl<L: Deref> NodeCustomMessageHandler<L>
 where
 	L::Target: Logger,
 {
-	pub(crate) fn new_liquidity(liquidity_source: Arc<LiquiditySource<L>>) -> Self {
-		Self::Liquidity { liquidity_source }
+	pub(crate) fn new_liquidity(liquidity_source: Arc<LiquiditySource<L>>, logger: L) -> Self {
+		Self::Liquidity { liquidity_source, logger }
 	}
 
 	pub(crate) fn new_ignoring() -> Self {
@@ -66,8 +68,12 @@ where
 	) -> Result<(), lightning::ln::msgs::LightningError> {
 		match self {
 			Self::Ignoring => Ok(()), // Should be unreachable!() as the reader will return `None`
-			Self::Liquidity { liquidity_source, .. } => {
-				liquidity_source.liquidity_manager().handle_custom_message(msg, sender_node_id)
+			Self::Liquidity { liquidity_source, logger, .. } => {
+				let result = liquidity_source.liquidity_manager().handle_custom_message(msg.clone(), sender_node_id);
+				if let Err(ref e) = result {
+					log_error!(logger, "LSPS message handling failed for peer {}: {}. Raw payload: {}", sender_node_id, e.err, msg.payload);
+				}
+				result
 			},
 		}
 	}

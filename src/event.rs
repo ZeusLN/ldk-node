@@ -10,6 +10,7 @@ use core::task::{Poll, Waker};
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
@@ -48,10 +49,12 @@ use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
 use crate::runtime::Runtime;
-use crate::types::{CustomTlvRecord, DynStore, OnionMessenger, PaymentStore, Sweeper, Wallet};
+use crate::types::{
+	ClosedChannelStore, CustomTlvRecord, DynStore, OnionMessenger, PaymentStore, Sweeper, Wallet,
+};
 use crate::{
-	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
-	UserChannelId,
+	hex_utils, BumpTransactionEventHandler, ChannelManager, ClosedChannelDetails, Error, Graph,
+	PeerInfo, PeerStore, UserChannelId,
 };
 
 /// An event emitted by [`Node`], which should be handled by the user.
@@ -488,6 +491,7 @@ where
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 	payment_store: Arc<PaymentStore>,
 	peer_store: Arc<PeerStore<L>>,
+	closed_channel_store: Arc<ClosedChannelStore>,
 	runtime: Arc<Runtime>,
 	logger: L,
 	config: Arc<Config>,
@@ -507,6 +511,7 @@ where
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
 		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>,
+		closed_channel_store: Arc<ClosedChannelStore>,
 		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
 		om_mailbox: Option<Arc<OnionMessageMailbox>>, runtime: Arc<Runtime>, logger: L,
 		config: Arc<Config>,
@@ -522,6 +527,7 @@ where
 			liquidity_source,
 			payment_store,
 			peer_store,
+			closed_channel_store,
 			logger,
 			runtime,
 			config,
@@ -1492,9 +1498,35 @@ where
 				reason,
 				user_channel_id,
 				counterparty_node_id,
-				..
+				channel_capacity_sats,
+				channel_funding_txo,
+				last_local_balance_msat,
 			} => {
 				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
+
+				let closed_at_timestamp = SystemTime::now()
+					.duration_since(UNIX_EPOCH)
+					.unwrap_or(Duration::from_secs(0))
+					.as_secs();
+
+				let closed_channel = ClosedChannelDetails {
+					channel_id,
+					user_channel_id: UserChannelId(user_channel_id),
+					counterparty_node_id,
+					funding_txo: channel_funding_txo.map(|o| o.into_bitcoin_outpoint()),
+					channel_capacity_sats,
+					last_local_balance_msat,
+					closure_reason: Some(reason.clone()),
+					closed_at_timestamp,
+				};
+
+				if let Err(e) = self.closed_channel_store.insert(closed_channel) {
+					log_error!(
+						self.logger,
+						"Failed to persist closed channel details: {}",
+						e
+					);
+				}
 
 				let event = Event::ChannelClosed {
 					channel_id,
