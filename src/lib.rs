@@ -1159,7 +1159,7 @@ impl Node {
 			},
 			Err(e) => {
 				log_error!(self.logger, "Failed to initiate channel creation: {:?}", e);
-				Err(Error::ChannelCreationFailed)
+				Err(Error::ChannelCreationFailed { message: format!("{:?}", e) })
 			},
 		}
 	}
@@ -1267,7 +1267,7 @@ impl Node {
 	) -> Result<UserChannelId, Error> {
 		if let Err(err) = may_announce_channel(&self.config) {
 			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
-			return Err(Error::ChannelCreationFailed);
+			return Err(Error::ChannelCreationFailed { message: format!("Node not configured for channel forwarding: {}", err) });
 		}
 
 		self.open_channel_inner(
