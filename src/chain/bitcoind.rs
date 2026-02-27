@@ -385,7 +385,7 @@ impl BitcoindChainSource {
 			)
 			.await;
 
-		self.wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(res);
+		self.wallet_polling_status.lock().unwrap().propagate_result_to_subscribers(res.clone());
 
 		res
 	}
