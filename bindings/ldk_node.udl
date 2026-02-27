@@ -180,6 +180,7 @@ interface Node {
 	sequence<PaymentDetails> list_payments();
 	sequence<PeerDetails> list_peers();
 	sequence<ChannelDetails> list_channels();
+	sequence<ClosedChannelDetails> list_closed_channels();
 	NetworkGraph network_graph();
 	[Throws=NodeError]
 	void reset_network_graph();
@@ -648,6 +649,17 @@ dictionary ChannelDetails {
 	u64 inbound_htlc_minimum_msat;
 	u64? inbound_htlc_maximum_msat;
 	ChannelConfig config;
+};
+
+dictionary ClosedChannelDetails {
+	ChannelId channel_id;
+	UserChannelId user_channel_id;
+	PublicKey? counterparty_node_id;
+	OutPoint? funding_txo;
+	u64? channel_capacity_sats;
+	u64? last_local_balance_msat;
+	ClosureReason? closure_reason;
+	u64 closed_at_timestamp;
 };
 
 dictionary PeerDetails {
