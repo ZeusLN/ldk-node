@@ -42,12 +42,15 @@ use crate::chain::ChainSource;
 use crate::config::WALLET_KEYS_SEED_LEN;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::io::{
-	NODE_METRICS_KEY, NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
+	CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+	CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE, NODE_METRICS_KEY,
+	NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
 };
 use crate::logger::{log_error, LdkLogger, Logger};
 use crate::peer_store::PeerStore;
 use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
 use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
+use crate::closed_channel::ClosedChannelDetails;
 use crate::{Error, EventQueue, NodeMetrics, PaymentDetails};
 
 pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_scores_cache";
@@ -240,6 +243,38 @@ where
 			)
 		})?;
 		res.push(payment);
+	}
+	Ok(res)
+}
+
+/// Read previously persisted closed channel information from the store.
+pub(crate) fn read_closed_channels<L: Deref>(
+	kv_store: Arc<DynStore>, logger: L,
+) -> Result<Vec<ClosedChannelDetails>, std::io::Error>
+where
+	L::Target: LdkLogger,
+{
+	let mut res = Vec::new();
+
+	for stored_key in KVStoreSync::list(
+		&*kv_store,
+		CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+		CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	)? {
+		let mut reader = Cursor::new(KVStoreSync::read(
+			&*kv_store,
+			CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			&stored_key,
+		)?);
+		let closed_channel = ClosedChannelDetails::read(&mut reader).map_err(|e| {
+			log_error!(logger, "Failed to deserialize ClosedChannelDetails: {}", e);
+			std::io::Error::new(
+				std::io::ErrorKind::InvalidData,
+				"Failed to deserialize ClosedChannelDetails",
+			)
+		})?;
+		res.push(closed_channel);
 	}
 	Ok(res)
 }

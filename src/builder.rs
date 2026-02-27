@@ -58,7 +58,9 @@ use crate::io::utils::{
 };
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
-	self, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	self, CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+	CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::liquidity::{
 	LSPS1ClientConfig, LSPS2ClientConfig, LSPS2ServiceConfig, LSPS7ClientConfig,
@@ -71,8 +73,9 @@ use crate::peer_store::PeerStore;
 use crate::runtime::Runtime;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	ChainMonitor, ChannelManager, DynStore, DynStoreWrapper, GossipSync, Graph, KeysManager,
-	MessageRouter, OnionMessenger, PaymentStore, PeerManager, Persister, SyncAndAsyncKVStore,
+	ChainMonitor, ChannelManager, ClosedChannelStore, DynStore, DynStoreWrapper, GossipSync, Graph,
+	KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager, Persister,
+	SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -1109,6 +1112,21 @@ fn build_with_store_internal(
 		},
 	};
 
+	let closed_channel_store =
+		match io::utils::read_closed_channels(Arc::clone(&kv_store), Arc::clone(&logger)) {
+			Ok(closed_channels) => Arc::new(ClosedChannelStore::new(
+				closed_channels,
+				CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+				CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+				Arc::clone(&kv_store),
+				Arc::clone(&logger),
+			)),
+			Err(e) => {
+				log_error!(logger, "Failed to read closed channel data from store: {}", e);
+				return Err(BuildError::ReadFailed);
+			},
+		};
+
 	let (chain_source, chain_tip_opt) = match chain_data_source_config {
 		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {
 			let sync_config = sync_config.unwrap_or(EsploraSyncConfig::default());
@@ -1606,7 +1624,7 @@ fn build_with_store_internal(
 			let liquidity_source = runtime
 				.block_on(async move { liquidity_source_builder.build().await.map(Arc::new) })?;
 			let custom_message_handler =
-				Arc::new(NodeCustomMessageHandler::new_liquidity(Arc::clone(&liquidity_source)));
+				Arc::new(NodeCustomMessageHandler::new_liquidity(Arc::clone(&liquidity_source), Arc::clone(&logger)));
 			(Some(liquidity_source), custom_message_handler)
 		} else {
 			(None, Arc::new(NodeCustomMessageHandler::new_ignoring()))
@@ -1753,6 +1771,7 @@ fn build_with_store_internal(
 		scorer,
 		peer_store,
 		payment_store,
+		closed_channel_store,
 		is_running,
 		node_metrics,
 		om_mailbox,
