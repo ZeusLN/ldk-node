@@ -100,7 +100,7 @@ where
 		let mut pending_connection =
 			PendingConnectionGuard::new(&self.pending_connections, node_id);
 		let res = self.do_connect_peer_internal(node_id, addr).await;
-		self.propagate_result_to_subscribers(&node_id, res);
+		self.propagate_result_to_subscribers(&node_id, res.clone());
 		pending_connection.disarm();
 		res
 	}
@@ -176,7 +176,7 @@ where
 		let mut pending_connections_lock = self.pending_connections.lock().unwrap();
 		if let Some(connection_ready_senders) = pending_connections_lock.remove(node_id) {
 			for sender in connection_ready_senders {
-				let _ = sender.send(res).map_err(|e| {
+				let _ = sender.send(res.clone()).map_err(|e| {
 					log_error!(
 						self.logger,
 						"Failed to send connection result to subscribers: {:?}",
