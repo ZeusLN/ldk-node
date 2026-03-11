@@ -1784,8 +1784,10 @@ impl Node {
 			})?;
 		}
 
-		// Clear the in-memory graph by marking all channels as stale
-		self.network_graph.remove_stale_channels_and_tracking_with_time(u64::MAX);
+		// Clear the in-memory graph by marking all channels as stale.
+		// Note: LDK's implementation returns early if current_time > u32::MAX,
+		// so we pass u32::MAX to ensure all channels appear stale and get removed.
+		self.network_graph.remove_stale_channels_and_tracking_with_time(u32::MAX as u64);
 
 		Ok(())
 	}
