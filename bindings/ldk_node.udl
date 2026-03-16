@@ -194,6 +194,8 @@ interface Node {
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
 	[Throws=NodeError]
 	bytes export_pathfinding_scores();
+	[Throws=NodeError]
+	string sweep_remote_closed_outputs([ByRef]string sweep_address, u64 fee_rate_sats_per_vbyte, u64 sleep_seconds);
 };
 
 [Enum]
