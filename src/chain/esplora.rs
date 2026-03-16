@@ -424,6 +424,17 @@ impl EsploraChainSource {
 	}
 }
 
+impl EsploraChainSource {
+	pub(crate) async fn get_scripthash_utxos(
+		&self, script: &Script,
+	) -> Result<Vec<esplora_client::Utxo>, Error> {
+		self.esplora_client.get_scripthash_utxos(script).await.map_err(|e| {
+			log_error!(self.logger, "Failed to query scripthash UTXOs: {}", e);
+			Error::ConnectionFailed
+		})
+	}
+}
+
 impl Filter for EsploraChainSource {
 	fn register_tx(&self, txid: &Txid, script_pubkey: &Script) {
 		self.tx_sync.register_tx(txid, script_pubkey);
