@@ -127,6 +127,10 @@ interface Builder {
 	Node build_with_vss_store_and_fixed_headers(NodeEntropy node_entropy, string vss_url, string store_id, record<string, string> fixed_headers);
 	[Throws=BuildError]
 	Node build_with_vss_store_and_header_provider(NodeEntropy node_entropy, string vss_url, string store_id, VssHeaderProvider header_provider);
+	[Throws=BuildError]
+	Node build_with_dual_store_and_fixed_headers(NodeEntropy node_entropy, string vss_url, string store_id, record<string, string> fixed_headers);
+	[Throws=BuildError]
+	Node build_with_dual_store_and_header_provider(NodeEntropy node_entropy, string vss_url, string store_id, VssHeaderProvider header_provider);
 };
 
 interface Node {
