@@ -116,7 +116,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 pub use closed_channel::ClosedChannelDetails;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Address, Amount};
+use bitcoin::{Address, Amount, WPubkeyHash};
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
 pub use builder::BuildError;
@@ -1837,6 +1837,223 @@ impl Node {
 			);
 			Error::PersistenceFailed
 		})
+	}
+
+	/// Scans for funds from counterparty force-closed channels and creates a sweep transaction.
+	///
+	/// This method derives all possible payment scripts from the node's seed, queries the
+	/// Esplora server for UTXOs matching those scripts, and builds a signed transaction
+	/// sweeping all found funds to the given `sweep_address`.
+	///
+	/// Returns the hex-encoded signed transaction, which can then be broadcast.
+	///
+	/// Only works with Esplora chain source. Requires the node to have been started with
+	/// `v2_remote_key_derivation` enabled (which is the default in ldk-node).
+	pub fn sweep_remote_closed_outputs(
+		&self, sweep_address: &str, fee_rate_sats_per_vbyte: u64, sleep_seconds: u64,
+	) -> Result<String, Error> {
+		use bitcoin::consensus::encode::serialize_hex;
+		use bitcoin::hashes::Hash;
+		use bitcoin::sighash::SighashCache;
+		use bitcoin::transaction::Version;
+		use bitcoin::{
+			EcdsaSighashType, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+		};
+		use lightning::ln::chan_utils::get_to_countersigner_keyed_anchor_redeemscript;
+
+		let sweep_addr = sweep_address
+			.parse::<Address<bitcoin::address::NetworkUnchecked>>()
+			.map_err(|_| {
+				log_error!(self.logger, "Invalid sweep address: {}", sweep_address);
+				Error::InvalidAddress
+			})?
+			.require_network(self.config.network)
+			.map_err(|_| {
+				log_error!(
+					self.logger,
+					"Sweep address does not match configured network: {}",
+					sweep_address
+				);
+				Error::InvalidAddress
+			})?;
+
+		// Get all possible scripts with their signing keys
+		let spks_with_keys =
+			self.keys_manager.possible_v2_counterparty_closed_balance_spks_with_keys();
+
+		// Build a map from script -> signing key for quick lookup
+		let script_to_key: std::collections::HashMap<ScriptBuf, bitcoin::secp256k1::SecretKey> =
+			spks_with_keys.into_iter().collect();
+
+		let chain_source = Arc::clone(&self.chain_source);
+
+		// Query Esplora for UTXOs matching our scripts
+		let found_utxos: Vec<(
+			esplora_client::Utxo,
+			ScriptBuf,
+			bitcoin::secp256k1::SecretKey,
+		)> = self.runtime.block_on(async {
+			let mut results = Vec::new();
+			let scripts: Vec<_> = script_to_key.keys().cloned().collect();
+
+			// Process in batches of 20 for concurrency
+			for chunk in scripts.chunks(20) {
+				let mut join_set = tokio::task::JoinSet::new();
+				for script in chunk {
+					let cs = Arc::clone(&chain_source);
+					let s = script.clone();
+					join_set.spawn(async move {
+						let utxos = cs.get_scripthash_utxos(&s).await;
+						(s, utxos)
+					});
+				}
+
+				while let Some(result) = join_set.join_next().await {
+					if let Ok((script, Ok(utxos))) = result {
+						for utxo in utxos {
+							if let Some(key) = script_to_key.get(&script) {
+								results.push((utxo, script.clone(), *key));
+							}
+						}
+					}
+				}
+
+				// Sleep between batches to avoid rate limiting by the Esplora server
+				if sleep_seconds > 0 {
+					tokio::time::sleep(Duration::from_secs(sleep_seconds)).await;
+				}
+			}
+			results
+		});
+
+		if found_utxos.is_empty() {
+			log_info!(self.logger, "No recoverable funds found for sweep_remote_closed");
+			return Err(Error::InsufficientFunds);
+		}
+
+		log_info!(
+			self.logger,
+			"Found {} UTXOs to sweep from counterparty force-closed channels",
+			found_utxos.len()
+		);
+
+		// Build the transaction
+		let secp = bitcoin::secp256k1::Secp256k1::new();
+
+		let mut tx_ins = Vec::new();
+		let mut total_value = Amount::ZERO;
+
+		for (utxo, _script, _key) in &found_utxos {
+			tx_ins.push(TxIn {
+				previous_output: bitcoin::OutPoint { txid: utxo.txid, vout: utxo.vout },
+				script_sig: bitcoin::ScriptBuf::new(),
+				sequence: Sequence(1), // CSV 1 for anchor outputs, also fine for P2WPKH
+				witness: Witness::default(),
+			});
+			total_value += utxo.value;
+		}
+
+		// Calculate fee: estimate witness size
+		// P2WPKH input witness: ~107 vbytes (1 sig + 1 pubkey)
+		// P2WSH anchor input witness: ~115 vbytes (1 sig + witness script)
+		// For simplicity, use a conservative estimate
+		let estimated_weight = 40u64 // base tx overhead (version + locktime + marker + flag)
+			+ (tx_ins.len() as u64) * 41 // input without witness (outpoint + sequence + script_sig len)
+			+ 31 // single output (value + script_pubkey)
+			+ (tx_ins.len() as u64) * 112; // witness per input (conservative)
+		let estimated_vbytes = (estimated_weight + 3) / 4;
+		let fee = Amount::from_sat(estimated_vbytes * fee_rate_sats_per_vbyte);
+
+		if total_value <= fee {
+			log_error!(
+				self.logger,
+				"Total UTXO value ({}) is less than or equal to estimated fee ({})",
+				total_value,
+				fee
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
+		let tx_out = TxOut { value: total_value - fee, script_pubkey: sweep_addr.script_pubkey() };
+
+		let mut tx =
+			Transaction { version: Version::TWO, lock_time: bitcoin::absolute::LockTime::ZERO, input: tx_ins, output: vec![tx_out] };
+
+		// Sign each input
+		for (idx, (utxo, script, key)) in found_utxos.iter().enumerate() {
+			let pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, key);
+
+			// Determine if this is P2WPKH or P2WSH (anchor)
+			let wpkh_script = ScriptBuf::new_p2wpkh(
+				&WPubkeyHash::hash(&pubkey.serialize()),
+			);
+
+			if *script == wpkh_script {
+				// P2WPKH signing
+				let mut sighash_cache = SighashCache::new(&tx);
+				let sighash = sighash_cache
+					.p2wpkh_signature_hash(
+						idx,
+						&ScriptBuf::new_p2wpkh(&WPubkeyHash::hash(&pubkey.serialize())),
+						utxo.value,
+						EcdsaSighashType::All,
+					)
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to compute sighash: {:?}", e);
+						Error::WalletOperationFailed
+					})?;
+
+				let msg =
+					bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array());
+				let sig = secp.sign_ecdsa(&msg, key);
+
+				let mut sig_bytes = sig.serialize_der().to_vec();
+				sig_bytes.push(EcdsaSighashType::All as u8);
+
+				tx.input[idx].witness = Witness::new();
+				tx.input[idx].witness.push(sig_bytes);
+				tx.input[idx].witness.push(pubkey.serialize().to_vec());
+			} else {
+				// P2WSH anchor output signing
+				let witness_script =
+					get_to_countersigner_keyed_anchor_redeemscript(&pubkey);
+
+				let mut sighash_cache = SighashCache::new(&tx);
+				let sighash = sighash_cache
+					.p2wsh_signature_hash(
+						idx,
+						&witness_script,
+						utxo.value,
+						EcdsaSighashType::All,
+					)
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to compute sighash: {:?}", e);
+						Error::WalletOperationFailed
+					})?;
+
+				let msg =
+					bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array());
+				let sig = secp.sign_ecdsa(&msg, key);
+
+				let mut sig_bytes = sig.serialize_der().to_vec();
+				sig_bytes.push(EcdsaSighashType::All as u8);
+
+				tx.input[idx].witness = Witness::new();
+				tx.input[idx].witness.push(sig_bytes);
+				tx.input[idx].witness.push(witness_script.to_bytes());
+			}
+		}
+
+		let tx_hex = serialize_hex(&tx);
+		log_info!(
+			self.logger,
+			"Created sweep transaction with {} inputs, total value: {}, fee: {}",
+			tx.input.len(),
+			total_value,
+			fee
+		);
+
+		Ok(tx_hex)
 	}
 }
 

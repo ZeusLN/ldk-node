@@ -892,6 +892,8 @@ pub(crate) struct WalletKeysManager {
 	inner: KeysManager,
 	wallet: Arc<Wallet>,
 	logger: Arc<Logger>,
+	static_payment_key: bitcoin::bip32::Xpriv,
+	secp_ctx: Secp256k1<All>,
 }
 
 impl WalletKeysManager {
@@ -904,7 +906,20 @@ impl WalletKeysManager {
 		logger: Arc<Logger>,
 	) -> Self {
 		let inner = KeysManager::new(seed, starting_time_secs, starting_time_nanos, true);
-		Self { inner, wallet, logger }
+
+		// Replicate the static_payment_key derivation from KeysManager::new so we can
+		// generate scripts+keys for sweep_remote_closed without accessing private fields.
+		let secp_ctx = Secp256k1::new();
+		let master_key =
+			bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Testnet, seed).unwrap();
+		let static_payment_key = master_key
+			.derive_priv(
+				&secp_ctx,
+				&bitcoin::bip32::ChildNumber::from_hardened_idx(8).expect("key space exhausted"),
+			)
+			.expect("Your RNG is busted");
+
+		Self { inner, wallet, logger, static_payment_key, secp_ctx }
 	}
 
 	pub fn sign_message(&self, msg: &[u8]) -> String {
@@ -917,6 +932,45 @@ impl WalletKeysManager {
 
 	pub fn verify_signature(&self, msg: &[u8], sig: &str, pkey: &PublicKey) -> bool {
 		message_signing::verify(msg, sig, pkey)
+	}
+
+	/// Returns the possible script pubkeys for counterparty force-closed channels along with
+	/// their corresponding signing keys. This is used by `sweep_remote_closed_outputs` to
+	/// find and sign sweep transactions.
+	pub(crate) fn possible_v2_counterparty_closed_balance_spks_with_keys(
+		&self,
+	) -> Vec<(ScriptBuf, SecretKey)> {
+		use lightning::ln::chan_utils::get_countersigner_payment_script;
+		use lightning::sign::STATIC_PAYMENT_KEY_COUNT;
+		use lightning::types::features::ChannelTypeFeatures;
+
+		let mut res =
+			Vec::with_capacity(usize::from(STATIC_PAYMENT_KEY_COUNT) * 2);
+		let static_remote_key_features = ChannelTypeFeatures::only_static_remote_key();
+		let mut zero_fee_htlc_features = ChannelTypeFeatures::only_static_remote_key();
+		zero_fee_htlc_features.set_anchors_zero_fee_htlc_tx_required();
+
+		for idx in 0..STATIC_PAYMENT_KEY_COUNT {
+			let key = self
+				.static_payment_key
+				.derive_priv(
+					&self.secp_ctx,
+					&bitcoin::bip32::ChildNumber::from_hardened_idx(u32::from(idx))
+						.expect("key space exhausted"),
+				)
+				.expect("Your RNG is busted")
+				.private_key;
+			let pubkey = PublicKey::from_secret_key(&self.secp_ctx, &key);
+			res.push((
+				get_countersigner_payment_script(&static_remote_key_features, &pubkey),
+				key,
+			));
+			res.push((
+				get_countersigner_payment_script(&zero_fee_htlc_features, &pubkey),
+				key,
+			));
+		}
+		res
 	}
 }
 

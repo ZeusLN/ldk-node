@@ -25,7 +25,7 @@ use crate::config::{
 };
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::io::utils::write_node_metrics;
-use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
@@ -412,6 +412,20 @@ impl ChainSource {
 						output_sweeper,
 					)
 					.await
+			},
+		}
+	}
+
+	pub(crate) async fn get_scripthash_utxos(
+		&self, script: &bitcoin::Script,
+	) -> Result<Vec<esplora_client::Utxo>, Error> {
+		match &self.kind {
+			ChainSourceKind::Esplora(esplora_chain_source) => {
+				esplora_chain_source.get_scripthash_utxos(script).await
+			},
+			_ => {
+				log_error!(self.logger, "get_scripthash_utxos is only supported with Esplora chain source");
+				Err(Error::ConnectionFailed)
 			},
 		}
 	}
