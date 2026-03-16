@@ -626,6 +626,24 @@ impl ChainSource {
 		}
 	}
 
+	#[cfg(feature = "chain-esplora")]
+	pub(crate) async fn get_scripthash_utxos(
+		&self, script: &bitcoin::Script,
+	) -> Result<Vec<esplora_client::Utxo>, Error> {
+		match &self.kind {
+			ChainSourceKind::Esplora(esplora_chain_source) => {
+				esplora_chain_source.get_scripthash_utxos(script).await
+			},
+			_ => {
+				crate::logger::log_error!(
+					self.logger,
+					"get_scripthash_utxos is only supported with Esplora chain source"
+				);
+				Err(Error::ConnectionFailed)
+			},
+		}
+	}
+
 	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
 		match &self.kind {
 			#[cfg(feature = "chain-esplora")]
