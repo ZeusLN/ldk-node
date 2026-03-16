@@ -85,6 +85,37 @@ impl SqliteStore {
 	pub fn get_data_dir(&self) -> PathBuf {
 		self.inner.data_dir.clone()
 	}
+
+	/// Returns all `(primary_namespace, secondary_namespace, key)` tuples stored in the database.
+	pub fn list_all_keys(&self) -> io::Result<Vec<(String, String, String)>> {
+		let locked_conn = self.inner.connection.lock().unwrap();
+
+		let sql = format!(
+			"SELECT primary_namespace, secondary_namespace, key FROM {}",
+			self.inner.kv_table_name
+		);
+		let mut stmt = locked_conn.prepare_cached(&sql).map_err(|e| {
+			let msg = format!("Failed to prepare statement: {}", e);
+			io::Error::new(io::ErrorKind::Other, msg)
+		})?;
+
+		let mut entries = Vec::new();
+		let rows_iter = stmt
+			.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+			.map_err(|e| {
+				let msg = format!("Failed to retrieve queried rows: {}", e);
+				io::Error::new(io::ErrorKind::Other, msg)
+			})?;
+
+		for entry in rows_iter {
+			entries.push(entry.map_err(|e| {
+				let msg = format!("Failed to retrieve queried rows: {}", e);
+				io::Error::new(io::ErrorKind::Other, msg)
+			})?);
+		}
+
+		Ok(entries)
+	}
 }
 
 impl KVStore for SqliteStore {
