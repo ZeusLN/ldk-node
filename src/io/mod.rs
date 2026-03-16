@@ -7,6 +7,7 @@
 
 //! Objects and traits for data persistence.
 
+pub mod dual_store;
 pub mod sqlite_store;
 #[cfg(test)]
 pub(crate) mod test_utils;

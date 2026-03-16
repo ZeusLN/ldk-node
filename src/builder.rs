@@ -670,6 +670,78 @@ impl NodeBuilder {
 		self.build_with_store(node_entropy, vss_store)
 	}
 
+	/// Builds a [`Node`] instance with a dual-write store (VSS + local SQLite) backend and
+	/// according to the options previously configured.
+	///
+	/// Uses [`FixedHeaders`] as default method for authentication/authorization with VSS.
+	/// All writes go to both stores (local first, then VSS best-effort).
+	/// Reads try VSS first, falling back to local SQLite on failure.
+	///
+	/// [`FixedHeaders`]: vss_client::headers::FixedHeaders
+	pub fn build_with_dual_store_and_fixed_headers(
+		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
+		fixed_headers: HashMap<String, String>,
+	) -> Result<Node, BuildError> {
+		use crate::io::dual_store::DualStore;
+
+		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+
+		let vss_builder =
+			VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
+		let vss_store = vss_builder.build_with_fixed_headers(fixed_headers).map_err(|e| {
+			log_error!(logger, "Failed to setup VSS store: {}", e);
+			BuildError::KVStoreSetupFailed
+		})?;
+
+		let storage_dir_path = self.config.storage_dir_path.clone();
+		fs::create_dir_all(storage_dir_path.clone())
+			.map_err(|_| BuildError::StoragePathAccessFailed)?;
+		let local_store = SqliteStore::new(
+			storage_dir_path.into(),
+			Some(io::sqlite_store::SQLITE_DB_FILE_NAME.to_string()),
+			Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
+		)
+		.map_err(|_| BuildError::KVStoreSetupFailed)?;
+
+		let dual_store = DualStore::new(vss_store, local_store);
+		self.build_with_store(node_entropy, dual_store)
+	}
+
+	/// Builds a [`Node`] instance with a dual-write store (VSS + local SQLite) backend and
+	/// according to the options previously configured.
+	///
+	/// Given `header_provider` is used to attach headers to every request made to VSS.
+	/// All writes go to both stores (local first, then VSS best-effort).
+	/// Reads try VSS first, falling back to local SQLite on failure.
+	pub fn build_with_dual_store_and_header_provider(
+		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
+		header_provider: Arc<dyn VssHeaderProvider>,
+	) -> Result<Node, BuildError> {
+		use crate::io::dual_store::DualStore;
+
+		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+
+		let vss_builder =
+			VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
+		let vss_store = vss_builder.build_with_header_provider(header_provider).map_err(|e| {
+			log_error!(logger, "Failed to setup VSS store: {}", e);
+			BuildError::KVStoreSetupFailed
+		})?;
+
+		let storage_dir_path = self.config.storage_dir_path.clone();
+		fs::create_dir_all(storage_dir_path.clone())
+			.map_err(|_| BuildError::StoragePathAccessFailed)?;
+		let local_store = SqliteStore::new(
+			storage_dir_path.into(),
+			Some(io::sqlite_store::SQLITE_DB_FILE_NAME.to_string()),
+			Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
+		)
+		.map_err(|_| BuildError::KVStoreSetupFailed)?;
+
+		let dual_store = DualStore::new(vss_store, local_store);
+		self.build_with_store(node_entropy, dual_store)
+	}
+
 	/// Builds a [`Node`] instance according to the options previously configured.
 	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
@@ -1037,6 +1109,49 @@ impl ArcedNodeBuilder {
 			.read()
 			.unwrap()
 			.build_with_vss_store_and_header_provider(
+				*node_entropy,
+				vss_url,
+				store_id,
+				header_provider,
+			)
+			.map(Arc::new)
+	}
+
+	/// Builds a [`Node`] instance with a dual-write store (VSS + local SQLite) backend and
+	/// according to the options previously configured.
+	///
+	/// Uses [`FixedHeaders`] as default method for authentication/authorization with VSS.
+	/// All writes go to both stores (local first, then VSS best-effort).
+	/// Reads try VSS first, falling back to local SQLite on failure.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	pub fn build_with_dual_store_and_fixed_headers(
+		&self, node_entropy: Arc<NodeEntropy>, vss_url: String, store_id: String,
+		fixed_headers: HashMap<String, String>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner
+			.read()
+			.unwrap()
+			.build_with_dual_store_and_fixed_headers(*node_entropy, vss_url, store_id, fixed_headers)
+			.map(Arc::new)
+	}
+
+	/// Builds a [`Node`] instance with a dual-write store (VSS + local SQLite) backend and
+	/// according to the options previously configured.
+	///
+	/// Given `header_provider` is used to attach headers to every request made to VSS.
+	/// All writes go to both stores (local first, then VSS best-effort).
+	/// Reads try VSS first, falling back to local SQLite on failure.
+	///
+	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	pub fn build_with_dual_store_and_header_provider(
+		&self, node_entropy: Arc<NodeEntropy>, vss_url: String, store_id: String,
+		header_provider: Arc<dyn VssHeaderProvider>,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner
+			.read()
+			.unwrap()
+			.build_with_dual_store_and_header_provider(
 				*node_entropy,
 				vss_url,
 				store_id,
