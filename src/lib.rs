@@ -1316,6 +1316,99 @@ impl Node {
 		Ok(user_channel_id)
 	}
 
+	/// Connect to a node and open a new unannounced channel, funding it with the maximum
+	/// possible amount from the on-chain wallet.
+	pub fn open_channel_fund_max(
+		&self, node_id: PublicKey, address: SocketAddress,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		utxos: Option<Vec<OutPoint>>,
+	) -> Result<UserChannelId, Error> {
+		let channel_amount_sats = self.estimate_max_channel_amount(&node_id, utxos.as_deref())?;
+		if let Some(utxos) = utxos {
+			self.open_channel_with_utxos(
+				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, utxos,
+			)
+		} else {
+			self.open_channel_inner(
+				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, false,
+			)
+		}
+	}
+
+	/// Connect to a node and open a new announced channel, funding it with the maximum
+	/// possible amount from the on-chain wallet.
+	pub fn open_announced_channel_fund_max(
+		&self, node_id: PublicKey, address: SocketAddress,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		utxos: Option<Vec<OutPoint>>,
+	) -> Result<UserChannelId, Error> {
+		if let Err(err) = may_announce_channel(&self.config) {
+			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
+			return Err(Error::ChannelCreationFailed { message: format!("Node not configured for channel forwarding: {}", err) });
+		}
+
+		let channel_amount_sats = self.estimate_max_channel_amount(&node_id, utxos.as_deref())?;
+		if let Some(utxos) = utxos {
+			self.open_announced_channel_with_utxos(
+				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, utxos,
+			)
+		} else {
+			self.open_channel_inner(
+				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, true,
+			)
+		}
+	}
+
+	fn estimate_max_channel_amount(
+		&self, peer_node_id: &PublicKey, utxos: Option<&[OutPoint]>,
+	) -> Result<u64, Error> {
+		if !*self.is_running.read().unwrap() {
+			return Err(Error::NotRunning);
+		}
+
+		// Calculate the anchor reserve needed for this new channel.
+		let new_channel_anchor_reserve =
+			self.config.anchor_channels_config.as_ref().map_or(0, |c| {
+				// We can't check peer features before connecting, so assume anchors.
+				if !c.trusted_peers_no_reserve.contains(peer_node_id) {
+					c.per_channel_reserve_sats
+				} else {
+					0
+				}
+			});
+
+		let cur_anchor_reserve_sats =
+			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+		let total_reserve = cur_anchor_reserve_sats + new_channel_anchor_reserve;
+
+		// Use a dummy P2WSH output script (like a real funding output) for size estimation.
+		let dummy_hash = bitcoin::hashes::Hash::from_byte_array([0u8; 32]);
+		let dummy_script = bitcoin::ScriptBuf::new_p2wsh(&dummy_hash);
+
+		let confirmation_target = fee_estimator::ConfirmationTarget::ChannelFunding;
+		let utxos_owned = utxos.map(|u| u.to_vec());
+
+		let max_amount = self.wallet.estimate_max_funding_amount(
+			dummy_script,
+			confirmation_target,
+			total_reserve,
+			utxos_owned,
+		)?;
+
+		if max_amount == 0 {
+			return Err(Error::InsufficientFunds);
+		}
+
+		log_info!(
+			self.logger,
+			"Estimated max channel funding amount: {}sats (anchor reserve: {}sats)",
+			max_amount,
+			new_channel_anchor_reserve,
+		);
+
+		Ok(max_amount)
+	}
+
 	/// Add funds from the on-chain wallet into an existing channel.
 	///
 	/// This provides for increasing a channel's outbound liquidity without re-balancing or closing
