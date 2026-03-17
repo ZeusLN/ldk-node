@@ -213,6 +213,7 @@ pub struct Node {
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	pending_funding_utxos: Arc<Mutex<HashMap<u128, Vec<OutPoint>>>>,
+	pending_fund_max: Arc<Mutex<std::collections::HashSet<u128>>>,
 }
 
 impl Node {
@@ -566,6 +567,7 @@ impl Node {
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
 			Arc::clone(&self.pending_funding_utxos),
+			Arc::clone(&self.pending_fund_max),
 		));
 
 		// Setup background processing
@@ -1324,15 +1326,19 @@ impl Node {
 		utxos: Option<Vec<OutPoint>>,
 	) -> Result<UserChannelId, Error> {
 		let channel_amount_sats = self.estimate_max_channel_amount(&node_id, utxos.as_deref())?;
-		if let Some(utxos) = utxos {
-			self.open_channel_with_utxos(
-				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, utxos,
-			)
+		let user_channel_id = if let Some(utxos) = utxos {
+			let ucid = self.open_channel_inner(
+				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, false,
+			)?;
+			self.pending_funding_utxos.lock().unwrap().insert(ucid.0, utxos);
+			ucid
 		} else {
 			self.open_channel_inner(
 				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, false,
-			)
-		}
+			)?
+		};
+		self.pending_fund_max.lock().unwrap().insert(user_channel_id.0);
+		Ok(user_channel_id)
 	}
 
 	/// Connect to a node and open a new announced channel, funding it with the maximum
@@ -1348,15 +1354,19 @@ impl Node {
 		}
 
 		let channel_amount_sats = self.estimate_max_channel_amount(&node_id, utxos.as_deref())?;
-		if let Some(utxos) = utxos {
-			self.open_announced_channel_with_utxos(
-				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, utxos,
-			)
+		let user_channel_id = if let Some(utxos) = utxos {
+			let ucid = self.open_channel_inner(
+				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, true,
+			)?;
+			self.pending_funding_utxos.lock().unwrap().insert(ucid.0, utxos);
+			ucid
 		} else {
 			self.open_channel_inner(
 				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, true,
-			)
-		}
+			)?
+		};
+		self.pending_fund_max.lock().unwrap().insert(user_channel_id.0);
+		Ok(user_channel_id)
 	}
 
 	fn estimate_max_channel_amount(

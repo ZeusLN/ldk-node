@@ -242,14 +242,18 @@ impl Wallet {
 	#[allow(deprecated)]
 	pub(crate) fn create_funding_transaction(
 		&self, output_script: ScriptBuf, amount: Amount, confirmation_target: ConfirmationTarget,
-		locktime: LockTime, utxos: Option<Vec<OutPoint>>,
+		locktime: LockTime, utxos: Option<Vec<OutPoint>>, fund_max: bool,
 	) -> Result<Transaction, Error> {
 		let fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
 
 		let mut locked_wallet = self.inner.lock().unwrap();
 		let mut tx_builder = locked_wallet.build_tx();
 
-		tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
+		if fund_max {
+			tx_builder.drain_wallet().drain_to(output_script).fee_rate(fee_rate).nlocktime(locktime);
+		} else {
+			tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
+		}
 
 		// Apply UTXO selection constraints if specified.
 		if let Some(ref selected_utxos) = utxos {
