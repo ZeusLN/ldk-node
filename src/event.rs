@@ -7,7 +7,7 @@
 
 use core::future::Future;
 use core::task::{Poll, Waker};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -498,6 +498,7 @@ where
 	static_invoice_store: Option<StaticInvoiceStore>,
 	onion_messenger: Arc<OnionMessenger>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
+	pending_funding_utxos: Arc<Mutex<HashMap<u128, Vec<OutPoint>>>>,
 }
 
 impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
@@ -515,6 +516,7 @@ where
 		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
 		om_mailbox: Option<Arc<OnionMessageMailbox>>, runtime: Arc<Runtime>, logger: L,
 		config: Arc<Config>,
+		pending_funding_utxos: Arc<Mutex<HashMap<u128, Vec<OutPoint>>>>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -534,6 +536,7 @@ where
 			static_invoice_store,
 			onion_messenger,
 			om_mailbox,
+			pending_funding_utxos,
 		}
 	}
 
@@ -554,6 +557,10 @@ where
 				let cur_height = self.channel_manager.current_best_block().height;
 				let locktime = LockTime::from_height(cur_height).unwrap_or(LockTime::ZERO);
 
+				// Look up and remove any pending UTXOs for coin control.
+				let pending_utxos =
+					self.pending_funding_utxos.lock().unwrap().remove(&user_channel_id);
+
 				// Sign the final funding transaction and broadcast it.
 				let channel_amount = Amount::from_sat(channel_value_satoshis);
 				match self.wallet.create_funding_transaction(
@@ -561,6 +568,7 @@ where
 					channel_amount,
 					confirmation_target,
 					locktime,
+					pending_utxos,
 				) {
 					Ok(final_tx) => {
 						let needs_manual_broadcast =

@@ -242,7 +242,7 @@ impl Wallet {
 	#[allow(deprecated)]
 	pub(crate) fn create_funding_transaction(
 		&self, output_script: ScriptBuf, amount: Amount, confirmation_target: ConfirmationTarget,
-		locktime: LockTime,
+		locktime: LockTime, utxos: Option<Vec<OutPoint>>,
 	) -> Result<Transaction, Error> {
 		let fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
 
@@ -250,6 +250,17 @@ impl Wallet {
 		let mut tx_builder = locked_wallet.build_tx();
 
 		tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
+
+		// Apply UTXO selection constraints if specified.
+		if let Some(ref selected_utxos) = utxos {
+			for outpoint in selected_utxos {
+				tx_builder.add_utxo(*outpoint).map_err(|e| {
+					log_error!(self.logger, "Failed to add UTXO {:?}: {}", outpoint, e);
+					Error::OnchainTxCreationFailed
+				})?;
+			}
+			tx_builder.manually_selected_only();
+		}
 
 		let mut psbt = match tx_builder.finish() {
 			Ok(psbt) => {
@@ -360,6 +371,27 @@ impl Wallet {
 		self.get_balances(total_anchor_channels_reserve_sats).map(|(_, s)| s)
 	}
 
+	pub(crate) fn list_utxos(&self) -> Result<Vec<crate::WalletUtxo>, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let network = self.config.network;
+		let mut result = Vec::new();
+
+		for utxo in locked_wallet.list_unspent() {
+			let address = bitcoin::Address::from_script(&utxo.txout.script_pubkey, network)
+				.map(|a| a.to_string())
+				.unwrap_or_default();
+			result.push(crate::WalletUtxo {
+				txid: utxo.outpoint.txid.to_string(),
+				vout: utxo.outpoint.vout,
+				value_sats: utxo.txout.value.to_sat(),
+				address,
+				is_spent: utxo.is_spent,
+			});
+		}
+
+		Ok(result)
+	}
+
 	pub(crate) fn parse_and_validate_address(&self, address: &Address) -> Result<Address, Error> {
 		Address::<NetworkUnchecked>::from_str(address.to_string().as_str())
 			.map_err(|_| Error::InvalidAddress)?
@@ -370,7 +402,7 @@ impl Wallet {
 	#[allow(deprecated)]
 	pub(crate) fn send_to_address(
 		&self, address: &bitcoin::Address, send_amount: OnchainSendAmount,
-		fee_rate: Option<FeeRate>,
+		fee_rate: Option<FeeRate>, utxos: Option<Vec<OutPoint>>,
 	) -> Result<Txid, Error> {
 		self.parse_and_validate_address(&address)?;
 
@@ -384,7 +416,7 @@ impl Wallet {
 
 			// Prepare the tx_builder. We properly check the reserve requirements (again) further down.
 			const DUST_LIMIT_SATS: u64 = 546;
-			let tx_builder = match send_amount {
+			let mut tx_builder = match send_amount {
 				OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
 					let mut tx_builder = locked_wallet.build_tx();
 					let amount = Amount::from_sat(amount_sats);
@@ -461,6 +493,17 @@ impl Wallet {
 					tx_builder
 				},
 			};
+
+			// Apply UTXO selection constraints if specified.
+			if let Some(ref selected_utxos) = utxos {
+				for outpoint in selected_utxos {
+					tx_builder.add_utxo(*outpoint).map_err(|e| {
+						log_error!(self.logger, "Failed to add UTXO {:?}: {}", outpoint, e);
+						Error::OnchainTxCreationFailed
+					})?;
+				}
+				tx_builder.manually_selected_only();
+			}
 
 			let mut psbt = match tx_builder.finish() {
 				Ok(psbt) => {

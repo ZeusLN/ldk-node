@@ -1891,6 +1891,7 @@ fn build_with_store_internal(
 		node_metrics,
 		om_mailbox,
 		async_payments_role,
+		pending_funding_utxos: Arc::new(Mutex::new(std::collections::HashMap::new())),
 	})
 }
 

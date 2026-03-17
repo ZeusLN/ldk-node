@@ -108,6 +108,7 @@ mod tx_broadcaster;
 mod types;
 mod wallet;
 
+use std::collections::HashMap;
 use std::default::Default;
 use std::net::ToSocketAddrs;
 use std::sync::{Arc, Mutex, RwLock};
@@ -116,7 +117,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 pub use closed_channel::ClosedChannelDetails;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Address, Amount, WPubkeyHash};
+use bitcoin::{Address, Amount, OutPoint, WPubkeyHash};
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
 pub use builder::BuildError;
@@ -154,7 +155,7 @@ use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use payment::{
-	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
+	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment, WalletUtxo,
 	UnifiedQrPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
@@ -211,6 +212,7 @@ pub struct Node {
 	node_metrics: Arc<RwLock<NodeMetrics>>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
+	pending_funding_utxos: Arc<Mutex<HashMap<u128, Vec<OutPoint>>>>,
 }
 
 impl Node {
@@ -563,6 +565,7 @@ impl Node {
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
+			Arc::clone(&self.pending_funding_utxos),
 		));
 
 		// Setup background processing
@@ -1278,6 +1281,39 @@ impl Node {
 			channel_config,
 			true,
 		)
+	}
+
+	/// Connect to a node and open a new unannounced channel using only the specified UTXOs
+	/// for the funding transaction.
+	pub fn open_channel_with_utxos(
+		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		utxos: Vec<OutPoint>,
+	) -> Result<UserChannelId, Error> {
+		let user_channel_id = self.open_channel_inner(
+			node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, false,
+		)?;
+		self.pending_funding_utxos.lock().unwrap().insert(user_channel_id.0, utxos);
+		Ok(user_channel_id)
+	}
+
+	/// Connect to a node and open a new announced channel using only the specified UTXOs
+	/// for the funding transaction.
+	pub fn open_announced_channel_with_utxos(
+		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		utxos: Vec<OutPoint>,
+	) -> Result<UserChannelId, Error> {
+		if let Err(err) = may_announce_channel(&self.config) {
+			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
+			return Err(Error::ChannelCreationFailed { message: format!("Node not configured for channel forwarding: {}", err) });
+		}
+
+		let user_channel_id = self.open_channel_inner(
+			node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, true,
+		)?;
+		self.pending_funding_utxos.lock().unwrap().insert(user_channel_id.0, utxos);
+		Ok(user_channel_id)
 	}
 
 	/// Add funds from the on-chain wallet into an existing channel.
