@@ -563,8 +563,8 @@ where
 				// Look up and remove any pending UTXOs for coin control.
 				let pending_utxos =
 					self.pending_funding_utxos.lock().unwrap().remove(&user_channel_id);
-				let fund_max =
-					self.pending_fund_max.lock().unwrap().remove(&user_channel_id);
+				// Clean up fund_max flag if present.
+				self.pending_fund_max.lock().unwrap().remove(&user_channel_id);
 
 				// Sign the final funding transaction and broadcast it.
 				let channel_amount = Amount::from_sat(channel_value_satoshis);
@@ -574,7 +574,6 @@ where
 					confirmation_target,
 					locktime,
 					pending_utxos,
-					fund_max,
 				) {
 					Ok(final_tx) => {
 						let needs_manual_broadcast =
