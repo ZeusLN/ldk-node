@@ -69,18 +69,35 @@ impl FeeEstimator for OnchainFeeEstimator {
 
 		let estimate = *locked_fee_rate_cache.get(&confirmation_target).unwrap_or(&fallback_rate);
 
-		// Currently we assume every transaction needs to at least be relayable, which is why we
-		// enforce a lower bound of `FEERATE_FLOOR_SATS_PER_KW`.
-		FeeRate::from_sat_per_kwu(estimate.to_sat_per_kwu().max(FEERATE_FLOOR_SATS_PER_KW as u64))
+		// For ChannelCloseMinimum, use a lower floor so we don't reject
+		// cooperative close proposals from peers using sub-relay feerates.
+		let floor = match confirmation_target {
+			ConfirmationTarget::Lightning(LdkConfirmationTarget::ChannelCloseMinimum) => {
+				FEERATE_FLOOR_SATS_PER_KW as u64 / 2
+			},
+			_ => FEERATE_FLOOR_SATS_PER_KW as u64,
+		};
+
+		FeeRate::from_sat_per_kwu(estimate.to_sat_per_kwu().max(floor))
 	}
 }
 
 impl LdkFeeEstimator for OnchainFeeEstimator {
 	fn get_est_sat_per_1000_weight(&self, confirmation_target: LdkConfirmationTarget) -> u32 {
-		self.estimate_fee_rate(confirmation_target.into())
+		let rate = self
+			.estimate_fee_rate(confirmation_target.into())
 			.to_sat_per_kwu()
 			.try_into()
-			.unwrap_or_else(|_| get_fallback_rate_for_ldk_target(confirmation_target))
+			.unwrap_or_else(|_| get_fallback_rate_for_ldk_target(confirmation_target));
+
+		// For ChannelCloseMinimum, return a value that won't be clamped up
+		// by LowerBoundedFeeEstimator. We want to accept cooperative close
+		// proposals below the standard relay fee floor.
+		if confirmation_target == LdkConfirmationTarget::ChannelCloseMinimum {
+			return core::cmp::min(rate, FEERATE_FLOOR_SATS_PER_KW / 2);
+		}
+
+		rate
 	}
 }
 
@@ -95,7 +112,7 @@ pub(crate) fn get_num_block_defaults_for_target(target: ConfirmationTarget) -> u
 			LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => 144,
 			LdkConfirmationTarget::AnchorChannelFee => 1008,
 			LdkConfirmationTarget::NonAnchorChannelFee => 12,
-			LdkConfirmationTarget::ChannelCloseMinimum => 144,
+			LdkConfirmationTarget::ChannelCloseMinimum => 1008,
 			LdkConfirmationTarget::OutputSpendingFee => 12,
 		},
 	}
@@ -149,6 +166,16 @@ pub(crate) fn apply_post_estimation_adjustments(
 				.saturating_sub(250)
 				.max(FEERATE_FLOOR_SATS_PER_KW as u64);
 			FeeRate::from_sat_per_kwu(slightly_less_than_background)
+		},
+		ConfirmationTarget::Lightning(LdkConfirmationTarget::ChannelCloseMinimum) => {
+			// ChannelCloseMinimum is the floor we accept from a counterparty's proposed
+			// cooperative close fee. We reduce it slightly so that we don't reject
+			// proposals that are just below our Esplora estimate.
+			let slightly_less = estimated_rate
+				.to_sat_per_kwu()
+				.saturating_sub(250)
+				.max(FEERATE_FLOOR_SATS_PER_KW as u64);
+			FeeRate::from_sat_per_kwu(slightly_less)
 		},
 		ConfirmationTarget::Lightning(LdkConfirmationTarget::MaximumFeeEstimate) => {
 			// MaximumFeeEstimate is mostly used for protection against fee-inflation attacks. As

@@ -39,17 +39,17 @@ default = []
 #lightning-liquidity = { version = "0.2.0", features = ["std"] }
 #lightning-macros = { version = "0.2.0" }
 
-lightning = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node", features = ["std"] }
-lightning-types = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node" }
-lightning-invoice = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node", features = ["std"] }
-lightning-net-tokio = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node" }
-lightning-persister = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node", features = ["tokio"] }
-lightning-background-processor = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node" }
-lightning-rapid-gossip-sync = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node" }
-lightning-block-sync = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node", features = ["rest-client", "rpc-client", "tokio"] }
-lightning-transaction-sync = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
-lightning-liquidity = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node", features = ["std"] }
-lightning-macros = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node" }
+lightning = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node-close-fix", features = ["std"] }
+lightning-types = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node-close-fix" }
+lightning-invoice = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node-close-fix", features = ["std"] }
+lightning-net-tokio = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node-close-fix" }
+lightning-persister = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node-close-fix", features = ["tokio"] }
+lightning-background-processor = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node-close-fix" }
+lightning-rapid-gossip-sync = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node-close-fix" }
+lightning-block-sync = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node-close-fix", features = ["rest-client", "rpc-client", "tokio"] }
+lightning-transaction-sync = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node-close-fix", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
+lightning-liquidity = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node-close-fix", features = ["std"] }
+lightning-macros = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node-close-fix" }
 
 bdk_chain = { version = "0.23.0", default-features = false, features = ["std"] }
 bdk_esplora = { version = "0.22.0", default-features = false, features = ["async-https-rustls", "tokio"]}
@@ -82,7 +82,7 @@ prost = { version = "0.11.6", default-features = false}
 winapi = { version = "0.3", features = ["winbase"] }
 
 [dev-dependencies]
-lightning = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node", features = ["std", "_test_utils"] }
+lightning = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node-close-fix", features = ["std", "_test_utils"] }
 proptest = "1.0.0"
 regex = "1.5.6"
 criterion = { version = "0.7.0", features = ["async_tokio"] }

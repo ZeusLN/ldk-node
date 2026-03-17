@@ -1603,26 +1603,11 @@ where
 			},
 			LdkEvent::BumpTransaction(bte) => {
 				match bte {
-					BumpTransactionEvent::ChannelClose {
-						ref channel_id,
-						ref counterparty_node_id,
-						..
-					} => {
-						// Skip bumping channel closes if our counterparty is trusted.
-						if let Some(anchor_channels_config) =
-							self.config.anchor_channels_config.as_ref()
-						{
-							if anchor_channels_config
-								.trusted_peers_no_reserve
-								.contains(counterparty_node_id)
-							{
-								log_debug!(self.logger,
-									"Ignoring BumpTransactionEvent::ChannelClose for channel {} due to trusted counterparty {}",
-									channel_id, counterparty_node_id
-								);
-								return Ok(());
-							}
-						}
+					BumpTransactionEvent::ChannelClose { .. } => {
+						// Always handle ChannelClose events, even for trusted
+						// peers. Skipping the commitment tx broadcast here can
+						// leave funds stranded when the counterparty doesn't
+						// broadcast (e.g. after failed cooperative close).
 					},
 					BumpTransactionEvent::HTLCResolution { .. } => {},
 				}
