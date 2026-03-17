@@ -299,6 +299,82 @@ impl Wallet {
 		Ok(tx)
 	}
 
+	/// Estimate the maximum channel funding amount by building a dummy drain transaction
+	/// to the given output script. Returns the amount that would be sent to the funding output.
+	#[allow(deprecated)]
+	pub(crate) fn estimate_max_funding_amount(
+		&self, output_script: ScriptBuf, confirmation_target: ConfirmationTarget,
+		cur_anchor_reserve_sats: u64, utxos: Option<Vec<OutPoint>>,
+	) -> Result<u64, Error> {
+		let fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
+
+		let mut locked_wallet = self.inner.lock().unwrap();
+
+		// If we need to retain an anchor reserve, we can't simply drain.
+		// Instead, build a tx that drains to the funding output while keeping
+		// a change output for the reserve.
+		const DUST_LIMIT_SATS: u64 = 546;
+
+		// Get change address before building tx to avoid borrow conflict.
+		let change_script = if cur_anchor_reserve_sats > DUST_LIMIT_SATS {
+			Some(locked_wallet.peek_address(KeychainKind::Internal, 0).address.script_pubkey())
+		} else {
+			None
+		};
+
+		let output_script_for_find = output_script.clone();
+		let mut tx_builder = locked_wallet.build_tx();
+
+		if let Some(change_script) = change_script {
+			tx_builder
+				.drain_wallet()
+				.drain_to(output_script)
+				.add_recipient(
+					change_script,
+					Amount::from_sat(cur_anchor_reserve_sats),
+				)
+				.fee_rate(fee_rate);
+		} else {
+			tx_builder.drain_wallet().drain_to(output_script).fee_rate(fee_rate);
+		}
+
+		if let Some(ref selected_utxos) = utxos {
+			for outpoint in selected_utxos {
+				tx_builder.add_utxo(*outpoint).map_err(|e| {
+					log_error!(self.logger, "Failed to add UTXO {:?}: {}", outpoint, e);
+					Error::OnchainTxCreationFailed
+				})?;
+			}
+			tx_builder.manually_selected_only();
+		}
+
+		let psbt = match tx_builder.finish() {
+			Ok(psbt) => psbt,
+			Err(err) => {
+				log_error!(
+					self.logger,
+					"Failed to estimate max funding amount: {}",
+					err
+				);
+				return Err(err.into());
+			},
+		};
+
+		// Find the drain output (the one paying to our output_script).
+		// Cancel the tx so BDK doesn't reserve the change address.
+		let funding_amount = psbt
+			.unsigned_tx
+			.output
+			.iter()
+			.find(|o| o.script_pubkey == output_script_for_find)
+			.map(|o| o.value.to_sat())
+			.unwrap_or(0);
+
+		locked_wallet.cancel_tx(&psbt.unsigned_tx);
+
+		Ok(funding_amount)
+	}
+
 	pub(crate) fn get_new_address(&self) -> Result<bitcoin::Address, Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
 		let mut locked_persister = self.persister.lock().unwrap();
