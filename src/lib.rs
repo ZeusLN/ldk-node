@@ -1376,20 +1376,10 @@ impl Node {
 			return Err(Error::NotRunning);
 		}
 
-		// Calculate the anchor reserve needed for this new channel.
-		let new_channel_anchor_reserve =
-			self.config.anchor_channels_config.as_ref().map_or(0, |c| {
-				// We can't check peer features before connecting, so assume anchors.
-				if !c.trusted_peers_no_reserve.contains(peer_node_id) {
-					c.per_channel_reserve_sats
-				} else {
-					0
-				}
-			});
-
-		let cur_anchor_reserve_sats =
-			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
-		let total_reserve = cur_anchor_reserve_sats + new_channel_anchor_reserve;
+		// For fund_max, don't subtract any anchor reserve — the user wants
+		// maximum channel capacity. Existing wallet UTXOs or future deposits
+		// can cover anchor fee-bumping if needed.
+		let reserve: u64 = 0;
 
 		// Use a dummy P2WSH output script (like a real funding output) for size estimation.
 		let dummy_hash = bitcoin::hashes::Hash::from_byte_array([0u8; 32]);
@@ -1401,7 +1391,7 @@ impl Node {
 		let max_amount = self.wallet.estimate_max_funding_amount(
 			dummy_script,
 			confirmation_target,
-			total_reserve,
+			reserve,
 			utxos_owned,
 		)?;
 
@@ -1411,9 +1401,8 @@ impl Node {
 
 		log_info!(
 			self.logger,
-			"Estimated max channel funding amount: {}sats (anchor reserve: {}sats)",
+			"Estimated max channel funding amount: {}sats",
 			max_amount,
-			new_channel_anchor_reserve,
 		);
 
 		Ok(max_amount)
