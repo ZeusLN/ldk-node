@@ -1887,6 +1887,14 @@ impl Node {
 
 		let chain_source = Arc::clone(&self.chain_source);
 
+		log_info!(
+			self.logger,
+			"Scanning {} scripts for counterparty force-closed UTXOs",
+			script_to_key.len()
+		);
+
+		let logger = Arc::clone(&self.logger);
+
 		// Query Esplora for UTXOs matching our scripts
 		let found_utxos: Vec<(
 			esplora_client::Utxo,
@@ -1895,6 +1903,8 @@ impl Node {
 		)> = self.runtime.block_on(async {
 			let mut results = Vec::new();
 			let scripts: Vec<_> = script_to_key.keys().cloned().collect();
+			let mut scanned = 0u64;
+			let mut errors = 0u64;
 
 			// Process in batches of 20 for concurrency
 			for chunk in scripts.chunks(20) {
@@ -1909,12 +1919,36 @@ impl Node {
 				}
 
 				while let Some(result) = join_set.join_next().await {
-					if let Ok((script, Ok(utxos))) = result {
-						for utxo in utxos {
-							if let Some(key) = script_to_key.get(&script) {
-								results.push((utxo, script.clone(), *key));
+					scanned += 1;
+					match result {
+						Ok((script, Ok(utxos))) => {
+							for utxo in utxos {
+								if let Some(key) = script_to_key.get(&script) {
+									log_info!(
+										logger,
+										"Found UTXO: txid={} vout={} value={}",
+										utxo.txid, utxo.vout, utxo.value
+									);
+									results.push((utxo, script.clone(), *key));
+								}
 							}
-						}
+						},
+						Ok((_script, Err(e))) => {
+							errors += 1;
+							if errors <= 3 {
+								log_error!(
+									logger,
+									"Esplora scripthash query failed: {}",
+									e
+								);
+							}
+						},
+						Err(e) => {
+							errors += 1;
+							if errors <= 3 {
+								log_error!(logger, "Task join error: {}", e);
+							}
+						},
 					}
 				}
 
@@ -1923,6 +1957,12 @@ impl Node {
 					tokio::time::sleep(Duration::from_secs(sleep_seconds)).await;
 				}
 			}
+
+			log_info!(
+				logger,
+				"Scan complete: checked {} scripts, {} errors, {} UTXOs found",
+				scanned, errors, results.len()
+			);
 			results
 		});
 
