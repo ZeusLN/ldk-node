@@ -9,13 +9,28 @@
 
 use std::sync::{Arc, RwLock};
 
-use bitcoin::{Address, Txid};
+use bitcoin::{Address, OutPoint, Txid};
 
 use crate::config::Config;
 use crate::error::Error;
 use crate::logger::{log_info, LdkLogger, Logger};
 use crate::types::{ChannelManager, Wallet};
 use crate::wallet::OnchainSendAmount;
+
+/// A UTXO in the on-chain wallet, suitable for FFI export.
+#[derive(Debug, Clone)]
+pub struct WalletUtxo {
+	/// The transaction ID of the UTXO.
+	pub txid: String,
+	/// The output index.
+	pub vout: u32,
+	/// The value in satoshis.
+	pub value_sats: u64,
+	/// The address this UTXO pays to.
+	pub address: String,
+	/// Whether the UTXO has been spent.
+	pub is_spent: bool,
+}
 
 #[cfg(not(feature = "uniffi"))]
 type FeeRate = bitcoin::FeeRate;
@@ -84,7 +99,7 @@ impl OnchainPayment {
 		let send_amount =
 			OnchainSendAmount::ExactRetainingReserve { amount_sats, cur_anchor_reserve_sats };
 		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
-		self.wallet.send_to_address(address, send_amount, fee_rate_opt)
+		self.wallet.send_to_address(address, send_amount, fee_rate_opt, None)
 	}
 
 	/// Send an on-chain payment to the given address, draining the available funds.
@@ -118,6 +133,54 @@ impl OnchainPayment {
 		};
 
 		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
-		self.wallet.send_to_address(address, send_amount, fee_rate_opt)
+		self.wallet.send_to_address(address, send_amount, fee_rate_opt, None)
+	}
+
+	/// List all UTXOs in the on-chain wallet.
+	pub fn list_utxos(&self) -> Result<Vec<WalletUtxo>, Error> {
+		self.wallet.list_utxos()
+	}
+
+	/// Send an on-chain payment using only the specified UTXOs.
+	///
+	/// This will respect any on-chain reserve we need to keep, i.e., won't allow to cut into
+	/// [`BalanceDetails::total_anchor_channels_reserve_sats`].
+	///
+	/// [`BalanceDetails::total_anchor_channels_reserve_sats`]: crate::BalanceDetails::total_anchor_channels_reserve_sats
+	pub fn send_to_address_with_utxos(
+		&self, address: &bitcoin::Address, amount_sats: u64, utxos: Vec<OutPoint>,
+		fee_rate: Option<FeeRate>,
+	) -> Result<Txid, Error> {
+		if !*self.is_running.read().unwrap() {
+			return Err(Error::NotRunning);
+		}
+
+		let cur_anchor_reserve_sats =
+			crate::total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+		let send_amount =
+			OnchainSendAmount::ExactRetainingReserve { amount_sats, cur_anchor_reserve_sats };
+		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		self.wallet.send_to_address(address, send_amount, fee_rate_opt, Some(utxos))
+	}
+
+	/// Send all funds from the specified UTXOs to the given address.
+	pub fn send_all_to_address_with_utxos(
+		&self, address: &bitcoin::Address, retain_reserves: bool, utxos: Vec<OutPoint>,
+		fee_rate: Option<FeeRate>,
+	) -> Result<Txid, Error> {
+		if !*self.is_running.read().unwrap() {
+			return Err(Error::NotRunning);
+		}
+
+		let send_amount = if retain_reserves {
+			let cur_anchor_reserve_sats =
+				crate::total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+			OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats }
+		} else {
+			OnchainSendAmount::AllDrainingReserve
+		};
+
+		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		self.wallet.send_to_address(address, send_amount, fee_rate_opt, Some(utxos))
 	}
 }
