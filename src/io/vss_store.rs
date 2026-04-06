@@ -16,6 +16,7 @@ use std::panic::RefUnwindSafe;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::OnceCell;
 
 use bitcoin::bip32::{ChildNumber, Xpriv};
 use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
@@ -51,7 +52,7 @@ type CustomRetryPolicy = FilteredRetryPolicy<
 	Box<dyn Fn(&VssError) -> bool + 'static + Send + Sync>,
 >;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum VssSchemaVersion {
 	// The initial schema version.
 	// This used an empty `aad` and unobfuscated `primary_namespace`/`secondary_namespace`s in the
@@ -121,25 +122,11 @@ impl VssStore {
 			header_provider.clone(),
 		);
 
-		let runtime_handle = internal_runtime.handle();
-		let schema_version = tokio::task::block_in_place(|| {
-			runtime_handle.block_on(async {
-				determine_and_write_schema_version(
-					&blocking_client,
-					&store_id,
-					data_encryption_key,
-					&key_obfuscator,
-				)
-				.await
-			})
-		})?;
-
 		let async_retry_policy = retry_policy();
 		let async_client =
 			VssClient::new_with_headers(base_url, async_retry_policy, header_provider);
 
 		let inner = Arc::new(VssStoreInner::new(
-			schema_version,
 			blocking_client,
 			async_client,
 			store_id,
@@ -377,7 +364,7 @@ impl Drop for VssStore {
 }
 
 struct VssStoreInner {
-	schema_version: VssSchemaVersion,
+	schema_version: OnceCell<VssSchemaVersion>,
 	blocking_client: VssClient<CustomRetryPolicy>,
 	// A secondary client that will only be used for async persistence via `KVStore`, to ensure TCP
 	// connections aren't shared between our outer and the internal runtime.
@@ -392,13 +379,13 @@ struct VssStoreInner {
 
 impl VssStoreInner {
 	pub(crate) fn new(
-		schema_version: VssSchemaVersion, blocking_client: VssClient<CustomRetryPolicy>,
+		blocking_client: VssClient<CustomRetryPolicy>,
 		async_client: VssClient<CustomRetryPolicy>, store_id: String,
 		data_encryption_key: [u8; 32], key_obfuscator: KeyObfuscator,
 	) -> Self {
 		let locks = Mutex::new(HashMap::new());
 		Self {
-			schema_version,
+			schema_version: OnceCell::new(),
 			blocking_client,
 			async_client,
 			store_id,
@@ -408,17 +395,37 @@ impl VssStoreInner {
 		}
 	}
 
+	/// Lazily determines the VSS schema version on first access. Subsequent calls return the
+	/// cached value without hitting the network.
+	async fn ensure_schema_version(
+		&self, client: &VssClient<CustomRetryPolicy>,
+	) -> io::Result<VssSchemaVersion> {
+		self.schema_version
+			.get_or_try_init(|| async {
+				determine_and_write_schema_version(
+					client,
+					&self.store_id,
+					self.data_encryption_key,
+					&self.key_obfuscator,
+				)
+				.await
+			})
+			.await
+			.copied()
+	}
+
 	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<tokio::sync::Mutex<u64>> {
 		let mut outer_lock = self.locks.lock().unwrap();
 		Arc::clone(&outer_lock.entry(locking_key).or_default())
 	}
 
 	fn build_obfuscated_key(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		&self, schema_version: VssSchemaVersion, primary_namespace: &str,
+		secondary_namespace: &str, key: &str,
 	) -> String {
-		if self.schema_version == VssSchemaVersion::V1 {
+		if schema_version == VssSchemaVersion::V1 {
 			let obfuscated_prefix =
-				self.build_obfuscated_prefix(primary_namespace, secondary_namespace);
+				self.build_obfuscated_prefix(schema_version, primary_namespace, secondary_namespace);
 			let obfuscated_key = self.key_obfuscator.obfuscate(key);
 			format!("{}#{}", obfuscated_prefix, obfuscated_key)
 		} else {
@@ -433,9 +440,10 @@ impl VssStoreInner {
 	}
 
 	fn build_obfuscated_prefix(
-		&self, primary_namespace: &str, secondary_namespace: &str,
+		&self, schema_version: VssSchemaVersion, primary_namespace: &str,
+		secondary_namespace: &str,
 	) -> String {
-		if self.schema_version == VssSchemaVersion::V1 {
+		if schema_version == VssSchemaVersion::V1 {
 			let prefix = format!("{}#{}", primary_namespace, secondary_namespace);
 			self.key_obfuscator.obfuscate(&prefix)
 		} else {
@@ -444,8 +452,10 @@ impl VssStoreInner {
 		}
 	}
 
-	fn extract_key(&self, unified_key: &str) -> io::Result<String> {
-		let mut parts = if self.schema_version == VssSchemaVersion::V1 {
+	fn extract_key(
+		&self, schema_version: VssSchemaVersion, unified_key: &str,
+	) -> io::Result<String> {
+		let mut parts = if schema_version == VssSchemaVersion::V1 {
 			let mut parts = unified_key.splitn(2, '#');
 			let _obfuscated_namespace = parts.next();
 			parts
@@ -465,12 +475,13 @@ impl VssStoreInner {
 	}
 
 	async fn list_all_keys(
-		&self, client: &VssClient<CustomRetryPolicy>, primary_namespace: &str,
-		secondary_namespace: &str,
+		&self, client: &VssClient<CustomRetryPolicy>, schema_version: VssSchemaVersion,
+		primary_namespace: &str, secondary_namespace: &str,
 	) -> io::Result<Vec<String>> {
 		let mut page_token = None;
 		let mut keys = vec![];
-		let key_prefix = self.build_obfuscated_prefix(primary_namespace, secondary_namespace);
+		let key_prefix =
+			self.build_obfuscated_prefix(schema_version, primary_namespace, secondary_namespace);
 		while page_token != Some("".to_string()) {
 			let request = ListKeyVersionsRequest {
 				store_id: self.store_id.clone(),
@@ -488,7 +499,7 @@ impl VssStoreInner {
 			})?;
 
 			for kv in response.key_versions {
-				keys.push(self.extract_key(&kv.key)?);
+				keys.push(self.extract_key(schema_version, &kv.key)?);
 			}
 			page_token = response.next_page_token;
 		}
@@ -501,7 +512,9 @@ impl VssStoreInner {
 	) -> io::Result<Vec<u8>> {
 		check_namespace_key_validity(&primary_namespace, &secondary_namespace, Some(&key), "read")?;
 
-		let store_key = self.build_obfuscated_key(&primary_namespace, &secondary_namespace, &key);
+		let schema_version = self.ensure_schema_version(client).await?;
+		let store_key =
+			self.build_obfuscated_key(schema_version, &primary_namespace, &secondary_namespace, &key);
 		let request = GetObjectRequest { store_id: self.store_id.clone(), key: store_key.clone() };
 		let resp = client.get_object(&request).await.map_err(|e| {
 			let msg = format!(
@@ -526,7 +539,7 @@ impl VssStoreInner {
 
 		let storable_builder = StorableBuilder::new(RandEntropySource);
 		let aad =
-			if self.schema_version == VssSchemaVersion::V1 { store_key.as_bytes() } else { &[] };
+			if schema_version == VssSchemaVersion::V1 { store_key.as_bytes() } else { &[] };
 		let decrypted = storable_builder.deconstruct(storable, &self.data_encryption_key, aad)?.0;
 		Ok(decrypted)
 	}
@@ -543,11 +556,13 @@ impl VssStoreInner {
 			"write",
 		)?;
 
-		let store_key = self.build_obfuscated_key(&primary_namespace, &secondary_namespace, &key);
+		let schema_version = self.ensure_schema_version(client).await?;
+		let store_key =
+			self.build_obfuscated_key(schema_version, &primary_namespace, &secondary_namespace, &key);
 		let vss_version = -1;
 		let storable_builder = StorableBuilder::new(RandEntropySource);
 		let aad =
-			if self.schema_version == VssSchemaVersion::V1 { store_key.as_bytes() } else { &[] };
+			if schema_version == VssSchemaVersion::V1 { store_key.as_bytes() } else { &[] };
 		let storable =
 			storable_builder.build(buf.to_vec(), vss_version, &self.data_encryption_key, aad);
 		let request = PutObjectRequest {
@@ -587,8 +602,9 @@ impl VssStoreInner {
 			"remove",
 		)?;
 
+		let schema_version = self.ensure_schema_version(client).await?;
 		let obfuscated_key =
-			self.build_obfuscated_key(&primary_namespace, &secondary_namespace, &key);
+			self.build_obfuscated_key(schema_version, &primary_namespace, &secondary_namespace, &key);
 
 		let key_value = KeyValue { key: obfuscated_key, version: -1, value: vec![] };
 		self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
@@ -614,8 +630,9 @@ impl VssStoreInner {
 	) -> io::Result<Vec<String>> {
 		check_namespace_key_validity(&primary_namespace, &secondary_namespace, None, "list")?;
 
+		let schema_version = self.ensure_schema_version(client).await?;
 		let keys = self
-			.list_all_keys(client, &primary_namespace, &secondary_namespace)
+			.list_all_keys(client, schema_version, &primary_namespace, &secondary_namespace)
 			.await
 			.map_err(|e| {
 				let msg = format!(
