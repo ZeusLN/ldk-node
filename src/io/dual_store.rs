@@ -13,10 +13,10 @@
 //!
 //! ## Design
 //!
-//! **Reads always go to local first.** Local SQLite is the source of truth during normal
-//! operation because writes always hit local before VSS. VSS is only read as a fallback when
-//! local returns `NotFound` — this handles the restore-from-seed case where a fresh device has
-//! an empty local store but VSS has the state.
+//! **Reads always go to local.** Local SQLite is the source of truth. VSS is only consulted
+//! for reads during a restore-from-seed, detected automatically when the local store is empty
+//! at construction time. Once local has data, VSS is never read — preventing stale VSS data
+//! from causing channel state mismatches and force closes.
 //!
 //! **Writes go to local first, then VSS (best-effort).** If the VSS write fails the data is
 //! still safe in local. The next write will try VSS again.
@@ -46,9 +46,9 @@ const BULK_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
 /// [`SqliteStore`].
 ///
 /// ## Read strategy
-/// 1. Read from local [`SqliteStore`] (always has latest data)
-/// 2. If local returns `NotFound`, try [`VssStore`] (handles restore-from-seed on new device)
-/// 3. If VSS returns data, write it to local for future reads
+/// - **Normal mode** (local has data): read from local [`SqliteStore`] only. Never consults VSS.
+/// - **Restore mode** (local was empty at construction): read from local first, fall back to
+///   [`VssStore`] on `NotFound`, and copy VSS data to local for future reads.
 ///
 /// ## Write strategy
 /// 1. Write to local [`SqliteStore`] first (fast, reliable, must succeed)
@@ -58,15 +58,21 @@ const BULK_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
 /// 1. Remove from both stores; local must succeed, VSS is best-effort
 ///
 /// ## List strategy
-/// 1. List from local first
-/// 2. If local returns empty and VSS returns results, use VSS (restore case)
+/// - **Normal mode**: list from local only.
+/// - **Restore mode**: list from local first; if empty, fall back to VSS.
 ///
 /// ## Background bulk sync
 /// On construction, spawns a background thread that syncs all local keys to VSS with a
 /// 60-second timeout. Does not block node startup.
+///
+/// **Restore mode** is auto-detected: if the local store is empty at construction time,
+/// restore mode is enabled and reads will fall back to VSS. Otherwise, reads are local-only.
 pub struct DualStore {
 	vss: Arc<VssStore>,
 	local: Arc<SqliteStore>,
+	/// When true, reads fall back to VSS on local `NotFound`. Auto-detected at construction:
+	/// `true` if local was empty (restore-from-seed), `false` otherwise.
+	restore_mode: bool,
 }
 
 impl DualStore {
@@ -78,7 +84,26 @@ impl DualStore {
 		let vss = Arc::new(vss);
 		let local = Arc::new(local);
 
-		// Spawn background bulk sync
+		// Auto-detect restore mode: if local is empty, this is a restore-from-seed
+		// and we should fall back to VSS for reads. Otherwise, local is the sole
+		// source of truth for reads — never consult VSS (which may have stale data).
+		let restore_mode = match local.list_all_keys() {
+			Ok(keys) => {
+				if keys.is_empty() {
+					eprintln!("DualStore: Local store is empty — entering restore mode (will read from VSS)");
+					true
+				} else {
+					eprintln!("DualStore: Local store has {} keys — normal mode (local-only reads)", keys.len());
+					false
+				}
+			},
+			Err(e) => {
+				eprintln!("DualStore: Failed to check local store — assuming normal mode: {}", e);
+				false
+			},
+		};
+
+		// Spawn background bulk sync (local → VSS)
 		let vss_bg = Arc::clone(&vss);
 		let local_bg = Arc::clone(&local);
 		std::thread::Builder::new()
@@ -88,7 +113,7 @@ impl DualStore {
 			})
 			.expect("Failed to spawn bulk sync thread");
 
-		Self { vss, local }
+		Self { vss, local, restore_mode }
 	}
 }
 
@@ -176,7 +201,14 @@ impl KVStoreSync for DualStore {
 		match KVStoreSync::read(self.local.as_ref(), primary_namespace, secondary_namespace, key) {
 			Ok(data) => Ok(data),
 			Err(local_err) if local_err.kind() == io::ErrorKind::NotFound => {
-				// Local doesn't have it — try VSS (restore-from-seed on new device).
+				if !self.restore_mode {
+					// Normal mode: local is the sole source of truth. Never fall back to
+					// VSS, which may have stale data that could cause channel state
+					// mismatches and force closes.
+					return Err(local_err);
+				}
+
+				// Restore mode: local is empty, try VSS (restore-from-seed on new device).
 				match KVStoreSync::read(
 					self.vss.as_ref(),
 					primary_namespace,
@@ -277,15 +309,16 @@ impl KVStoreSync for DualStore {
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> io::Result<Vec<String>> {
-		// List from local first.
 		let local_keys =
 			KVStoreSync::list(self.local.as_ref(), primary_namespace, secondary_namespace)?;
 
-		if !local_keys.is_empty() {
+		if !local_keys.is_empty() || !self.restore_mode {
+			// Normal mode: always return local results (even if empty).
+			// Restore mode with local results: return them.
 			return Ok(local_keys);
 		}
 
-		// Local is empty — try VSS for restore case.
+		// Restore mode and local is empty — try VSS.
 		match KVStoreSync::list(self.vss.as_ref(), primary_namespace, secondary_namespace) {
 			Ok(vss_keys) => Ok(vss_keys),
 			Err(e) => {
@@ -293,7 +326,6 @@ impl KVStoreSync for DualStore {
 					"DualStore: VSS list failed for {}/{}: {}",
 					primary_namespace, secondary_namespace, e
 				);
-				// Return the empty local list rather than an error.
 				Ok(local_keys)
 			},
 		}

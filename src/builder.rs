@@ -675,7 +675,7 @@ impl NodeBuilder {
 	///
 	/// Uses [`FixedHeaders`] as default method for authentication/authorization with VSS.
 	/// All writes go to both stores (local first, then VSS best-effort).
-	/// Reads try VSS first, falling back to local SQLite on failure.
+	/// Reads go to local SQLite only; VSS is read as fallback only during restore-from-seed.
 	///
 	/// [`FixedHeaders`]: vss_client::headers::FixedHeaders
 	pub fn build_with_dual_store_and_fixed_headers(
@@ -712,7 +712,7 @@ impl NodeBuilder {
 	///
 	/// Given `header_provider` is used to attach headers to every request made to VSS.
 	/// All writes go to both stores (local first, then VSS best-effort).
-	/// Reads try VSS first, falling back to local SQLite on failure.
+	/// Reads go to local SQLite only; VSS is read as fallback only during restore-from-seed.
 	pub fn build_with_dual_store_and_header_provider(
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		header_provider: Arc<dyn VssHeaderProvider>,
@@ -1122,7 +1122,7 @@ impl ArcedNodeBuilder {
 	///
 	/// Uses [`FixedHeaders`] as default method for authentication/authorization with VSS.
 	/// All writes go to both stores (local first, then VSS best-effort).
-	/// Reads try VSS first, falling back to local SQLite on failure.
+	/// Reads go to local SQLite only; VSS is read as fallback only during restore-from-seed.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	pub fn build_with_dual_store_and_fixed_headers(
@@ -1141,7 +1141,7 @@ impl ArcedNodeBuilder {
 	///
 	/// Given `header_provider` is used to attach headers to every request made to VSS.
 	/// All writes go to both stores (local first, then VSS best-effort).
-	/// Reads try VSS first, falling back to local SQLite on failure.
+	/// Reads go to local SQLite only; VSS is read as fallback only during restore-from-seed.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	pub fn build_with_dual_store_and_header_provider(
