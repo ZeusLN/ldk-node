@@ -5,7 +5,60 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-//! Background probing strategies for training the payment scorer.
+//! Background probing for training the payment scorer.
+//!
+//! Lightning Network nodes only know channels' capacities via their initially announced limits;
+//! the real values change unpredictably after payments have been sent, which makes some of
+//! the channels inoperable (capacity has been depleted). The only way to know about channel
+//! depletion is to attempt sending a payment through it. Thus, sending a live payment
+//! might involve a significant time delay for finding an appropriate channel with enough capacity,
+//! up to complete failure when a route with enough capacity cannot be found.
+//!
+//! The background probing service fires probes to learn about the live state of channels and
+//! their capacities, providing accurate data to the scorer and router.
+//!
+//! This module provides the configuration for such a service. There are two pre-built strategies,
+//! [`RandomStrategy`] and [`HighDegreeStrategy`], as well as a [`ProbingStrategy`] trait which
+//! allows defining a custom probing strategy (for example if there is an established payment
+//! pattern).
+//!
+//! # Configuration
+//!
+//! Probing is opt-in: a node only runs the service if a [`ProbingConfig`] has been registered
+//! on the [`Builder`] via [`Builder::set_probing_config`] before [`Builder::build`]. Without a
+//! config, no probes are sent.
+//!
+//! # Example
+//!
+//! ```no_run
+//! # #[cfg(not(feature = "uniffi"))]
+//! # {
+//! use std::time::Duration;
+//! use ldk_node::Builder;
+//! use ldk_node::probing::ProbingConfigBuilder;
+//!
+//! let probing_config = ProbingConfigBuilder::high_degree(100)
+//!     .interval(Duration::from_secs(30))
+//!     .max_locked_msat(500_000)
+//!     .diversity_penalty_msat(250)
+//!     .build();
+//!
+//! let mut builder = Builder::new();
+//! builder.set_probing_config(probing_config);
+//! # }
+//! ```
+//!
+//! # Caution
+//!
+//! Probes send real HTLCs along real paths. If an intermediate hop is offline or
+//! misbehaving, the probe HTLC can remain in-flight — locking outbound liquidity
+//! on the first-hop channel until the HTLC timeout elapses (potentially hours).
+//! `max_locked_msat` caps the total outbound capacity that in-flight probes may
+//! hold at any one time; tune it conservatively for nodes with tight liquidity.
+//!
+//! [`Builder`]: crate::Builder
+//! [`Builder::set_probing_config`]: crate::Builder::set_probing_config
+//! [`Builder::build`]: crate::Builder::build
 
 use std::collections::HashMap;
 use std::fmt;
@@ -58,27 +111,51 @@ impl fmt::Debug for ProbingStrategyKind {
 
 /// Configuration for the background probing subsystem.
 ///
-/// Construct via [`ProbingConfigBuilder`]. Pick a strategy with
-/// [`ProbingConfigBuilder::high_degree`], [`ProbingConfigBuilder::random_walk`], or
-/// [`ProbingConfigBuilder::custom`], chain optional setters, and finalize with
-/// [`ProbingConfigBuilder::build`].
+/// Instances are produced by [`ProbingConfigBuilder`], which exposes three strategy
+/// constructors: [`ProbingConfigBuilder::high_degree`], [`ProbingConfigBuilder::random_walk`],
+/// and [`ProbingConfigBuilder::custom`].
 ///
-/// # Caution
+/// Optional setters on the builder tune timing and liquidity limits, and
+/// [`ProbingConfigBuilder::build`] finalizes the value.
 ///
-/// Probes send real HTLCs along real paths. If an intermediate hop is offline or
-/// misbehaving, the probe HTLC can remain in-flight — locking outbound liquidity
-/// on the first-hop channel until the HTLC timeout elapses (potentially hours).
-/// `max_locked_msat` caps the total outbound capacity that in-flight probes may
-/// hold at any one time; tune it conservatively for nodes with tight liquidity.
+/// # Examples
 ///
-/// # Example
-/// ```ignore
+/// Using pre-built strategy:
+/// ```no_run
+/// # #[cfg(not(feature = "uniffi"))]
+/// # {
+/// use std::time::Duration;
+/// use ldk_node::Builder;
+/// use ldk_node::probing::ProbingConfigBuilder;
+///
 /// let config = ProbingConfigBuilder::high_degree(100)
 ///     .interval(Duration::from_secs(30))
 ///     .max_locked_msat(500_000)
 ///     .diversity_penalty_msat(250)
 ///     .build();
+///
+/// let mut builder = Builder::new();
 /// builder.set_probing_config(config);
+/// # }
+/// ```
+///
+/// Creating a custom strategy that always probes the same path:
+/// ```
+/// use ldk_node::lightning::routing::router::Path;
+/// use ldk_node::probing::ProbingStrategy;
+///
+/// struct FixedPathStrategy {
+///     path: Path,
+/// }
+/// impl ProbingStrategy for FixedPathStrategy {
+///     fn next_probe(&self) -> Option<Path> {
+///         if self.path.hops.len() > 1 {
+///             Some(self.path.clone())
+///         } else {
+///             None
+///         }
+///     }
+/// }
 /// ```
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
@@ -92,8 +169,9 @@ pub struct ProbingConfig {
 
 /// Builder for [`ProbingConfig`].
 ///
-/// Pick a strategy with [`high_degree`], [`random_walk`], or [`custom`], chain optional
-/// setters, and call [`build`] to finalize.
+/// A new instance starts from one of three strategy constructors — [`high_degree`],
+/// [`random_walk`], or [`custom`] — and is finalized through [`build`]. Optional setters
+/// in between override the timing and liquidity defaults.
 ///
 /// [`high_degree`]: Self::high_degree
 /// [`random_walk`]: Self::random_walk
@@ -193,8 +271,9 @@ impl ProbingConfigBuilder {
 /// A UniFFI-compatible wrapper around [`ProbingConfigBuilder`] that uses interior mutability
 /// so it can be shared behind an `Arc` as required by the FFI object model.
 ///
-/// Obtain one via the constructors [`new_high_degree`] or [`new_random_walk`], configure it
-/// with the `set_*` methods, then call [`build`] to produce a [`ProbingConfig`].
+/// Instances are produced by the constructors [`new_high_degree`] and [`new_random_walk`].
+/// The `set_*` methods override the defaults, and [`build`] yields the resulting
+/// [`ProbingConfig`].
 ///
 /// [`new_high_degree`]: Self::new_high_degree
 /// [`new_random_walk`]: Self::new_random_walk
@@ -263,7 +342,7 @@ impl ArcedProbingConfigBuilder {
 	}
 }
 
-/// Strategy can be used for determining the next target and amount for probing.
+/// A strategy that decides which path the probing service should probe next.
 pub trait ProbingStrategy: Send + Sync + 'static {
 	/// Returns the next probe path to run, or `None` to skip this tick.
 	fn next_probe(&self) -> Option<Path>;
@@ -281,6 +360,8 @@ pub trait ProbingStrategy: Send + Sync + 'static {
 ///
 /// The probe amount is chosen uniformly at random from
 /// `[min_amount_msat, max_amount_msat]`.
+///
+/// `HighDegreeStrategy` can only use publicly announced channels for probing.
 pub struct HighDegreeStrategy {
 	network_graph: Arc<Graph>,
 	channel_manager: Arc<ChannelManager>,
@@ -406,7 +487,7 @@ impl ProbingStrategy for HighDegreeStrategy {
 	}
 }
 
-/// Explores the graph by walking a random number of hops outward from one of our own
+/// Explores the graph by walking a random number (≥2) of hops outward from one of our own
 /// channels, constructing the [`Path`] explicitly.
 ///
 /// On each tick:
@@ -418,6 +499,8 @@ impl ProbingStrategy for HighDegreeStrategy {
 ///
 /// Because path selection ignores the scorer, this probes channels the router
 /// would never try on its own, teaching the scorer about previously unknown paths.
+///
+/// `RandomStrategy` can only use publicly announced channels for probing.
 pub struct RandomStrategy {
 	network_graph: Arc<Graph>,
 	channel_manager: Arc<ChannelManager>,

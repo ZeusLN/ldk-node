@@ -637,14 +637,20 @@ impl NodeBuilder {
 	/// Configures background probing.
 	///
 	/// Use [`ProbingConfigBuilder`] to build the configuration:
-	/// ```ignore
+	/// ```no_run
+	/// # #[cfg(not(feature = "uniffi"))]
+	/// # {
+	/// use std::time::Duration;
+	/// use ldk_node::Builder;
 	/// use ldk_node::probing::ProbingConfigBuilder;
 	///
+	/// let mut builder = Builder::new();
 	/// builder.set_probing_config(
 	///     ProbingConfigBuilder::high_degree(100)
 	///         .interval(Duration::from_secs(30))
 	///         .build()
 	/// );
+	/// # }
 	/// ```
 	///
 	/// [`ProbingConfigBuilder`]: crate::probing::ProbingConfigBuilder
