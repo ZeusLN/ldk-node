@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use common::{
 	expect_channel_ready_event, expect_event, generate_blocks_and_wait, open_channel,
 	premine_and_distribute_funds, random_chain_source, random_config, setup_bitcoind_and_electrsd,
-	setup_node, TestNode,
+	setup_node, wait_for_channel_ready_to_send, TestNode,
 };
 
 use ldk_node::bitcoin::Amount;
@@ -159,7 +159,9 @@ async fn probe_budget_increments_and_decrements() {
 
 	// Build the probe path now that channels are ready, then enable probing.
 	strategy.set_path(build_probe_path(&node_a, &node_b, &node_c, PROBE_AMOUNT_MSAT));
-	tokio::time::sleep(Duration::from_secs(3)).await;
+	// First hop carries amount + per-hop fee; second hop carries just amount.
+	wait_for_channel_ready_to_send(&node_a, &node_b, PROBE_AMOUNT_MSAT + 1000).await;
+	wait_for_channel_ready_to_send(&node_b, &node_c, PROBE_AMOUNT_MSAT).await;
 	strategy.start_probing();
 
 	let went_up = tokio::time::timeout(Duration::from_secs(30), async {
@@ -243,7 +245,8 @@ async fn exhausted_probe_budget_blocks_new_probes() {
 	assert_eq!(node_a.prober().map_or(1, |p| p.locked_msat()), 0, "initial locked_msat is nonzero");
 
 	strategy.set_path(build_probe_path(&node_a, &node_b, &node_c, PROBE_AMOUNT_MSAT));
-	tokio::time::sleep(Duration::from_secs(3)).await;
+	wait_for_channel_ready_to_send(&node_a, &node_b, PROBE_AMOUNT_MSAT + 1000).await;
+	wait_for_channel_ready_to_send(&node_b, &node_c, PROBE_AMOUNT_MSAT).await;
 	strategy.start_probing();
 
 	// Sample locked_msat across multiple probe cycles and assert the budget cap is never exceeded

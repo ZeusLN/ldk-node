@@ -695,6 +695,37 @@ pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoin
 	.await;
 }
 
+/// Polls the channel from `source_node` to `counterparty_node` until it reports `is_usable`
+/// and can carry an HTLC of `min_amount_msat` from `source_node`'s side.
+///
+/// After `ChannelReady`, channel-monitor persistence can lag for tens of seconds on slow
+/// CI runners; during that window `send_probe`/`send_payment` reject with
+/// `ParameterError("...monitor update is in progress...")`. This helper gives tests a
+/// deterministic readiness gate instead of racing the monitor-update pipeline.
+pub(crate) async fn wait_for_channel_ready_to_send(
+	source_node: &TestNode, counterparty_node: &TestNode, min_amount_msat: u64,
+) {
+	let counterparty = counterparty_node.node_id();
+	let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+	while tokio::time::Instant::now() < deadline {
+		let ready = source_node.list_channels().iter().any(|c| {
+			c.counterparty_node_id == counterparty
+				&& c.is_usable
+				&& c.next_outbound_htlc_limit_msat >= min_amount_msat
+		});
+		if ready {
+			return;
+		}
+		tokio::time::sleep(Duration::from_millis(100)).await;
+	}
+	panic!(
+		"channel from {} to {} not ready to send {} msat within 180s",
+		source_node.node_id(),
+		counterparty,
+		min_amount_msat,
+	);
+}
+
 pub(crate) async fn exponential_backoff_poll<T, F>(mut poll: F) -> T
 where
 	F: FnMut() -> Option<T>,
