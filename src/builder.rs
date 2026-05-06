@@ -2106,6 +2106,7 @@ fn build_with_store_internal(
 			interval: probing_cfg.interval,
 			max_locked_msat: probing_cfg.max_locked_msat,
 			locked_msat: Arc::new(AtomicU64::new(0)),
+			inflight_probes: Mutex::new(HashMap::new()),
 		})
 	});
 

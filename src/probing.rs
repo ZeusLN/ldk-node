@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bitcoin::secp256k1::PublicKey;
+use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::NodeId;
 use lightning::routing::router::{
 	Path, PaymentParameters, RouteHop, RouteParameters, MAX_PATH_LENGTH_ESTIMATE,
@@ -654,6 +655,7 @@ pub struct Prober {
 	/// Maximum total millisatoshis that may be locked in in-flight probes at any time.
 	pub max_locked_msat: u64,
 	pub(crate) locked_msat: Arc<AtomicU64>,
+	pub(crate) inflight_probes: Mutex<HashMap<PaymentId, u64>>,
 }
 
 fn fmt_path(path: &lightning::routing::router::Path) -> String {
@@ -670,8 +672,7 @@ impl Prober {
 		self.locked_msat.load(Ordering::Relaxed)
 	}
 
-	pub(crate) fn handle_probe_successful(&self, path: &lightning::routing::router::Path) {
-		let amount: u64 = path.hops.iter().map(|h| h.fee_msat).sum();
+	pub(crate) fn handle_background_probe_successful(&self, path: &Path, amount: u64) {
 		let prev = self
 			.locked_msat
 			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(amount)))
@@ -687,8 +688,7 @@ impl Prober {
 		);
 	}
 
-	pub(crate) fn handle_probe_failed(&self, path: &lightning::routing::router::Path) {
-		let amount: u64 = path.hops.iter().map(|h| h.fee_msat).sum();
+	pub(crate) fn handle_background_probe_failed(&self, path: &Path, amount: u64) {
 		let prev = self
 			.locked_msat
 			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(amount)))
@@ -727,9 +727,16 @@ pub(crate) async fn run_prober(prober: Arc<Prober>, mut stop_rx: tokio::sync::wa
 					log_debug!(prober.logger, "Skipping probe: locked-msat budget exceeded.");
 					continue;
 				}
+				// Hold `inflight_probes` across `send_probe` so the event handler in
+				// `event.rs` (which acquires the same lock to remove the entry) cannot
+				// observe a `ProbeSuccessful`/`ProbeFailed` for a payment_id we have not
+				// yet inserted, which would leave `locked_msat` permanently incremented.
+				let mut inflight = prober.inflight_probes.lock().expect("lock");
 				match prober.channel_manager.send_probe(path.clone()) {
-					Ok(_) => {
+					Ok((_, payment_id)) => {
+						inflight.insert(payment_id, amount);
 						prober.locked_msat.fetch_add(amount, Ordering::Release);
+						drop(inflight);
 						log_debug!(
 							prober.logger,
 							"Probe sent: locked {} msat, path: {}",
@@ -738,6 +745,7 @@ pub(crate) async fn run_prober(prober: Arc<Prober>, mut stop_rx: tokio::sync::wa
 						);
 					}
 					Err(e) => {
+						drop(inflight);
 						log_debug!(
 							prober.logger,
 							"Probe send failed: {:?}, path: {}",

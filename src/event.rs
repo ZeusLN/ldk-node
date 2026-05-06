@@ -1189,14 +1189,22 @@ where
 
 			LdkEvent::PaymentPathSuccessful { .. } => {},
 			LdkEvent::PaymentPathFailed { .. } => {},
-			LdkEvent::ProbeSuccessful { path, .. } => {
+			LdkEvent::ProbeSuccessful { path, payment_id, .. } => {
 				if let Some(prober) = &self.prober {
-					prober.handle_probe_successful(&path);
+					if let Some(amount) =
+						prober.inflight_probes.lock().expect("lock").remove(&payment_id)
+					{
+						prober.handle_background_probe_successful(&path, amount);
+					}
 				}
 			},
-			LdkEvent::ProbeFailed { path, .. } => {
+			LdkEvent::ProbeFailed { path, payment_id, .. } => {
 				if let Some(prober) = &self.prober {
-					prober.handle_probe_failed(&path);
+					if let Some(amount) =
+						prober.inflight_probes.lock().expect("lock").remove(&payment_id)
+					{
+						prober.handle_background_probe_failed(&path, amount);
+					}
 				}
 			},
 			LdkEvent::HTLCHandlingFailed { failure_type, .. } => {
