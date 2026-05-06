@@ -572,7 +572,8 @@ impl RandomStrategy {
 				Some((node_features, channel_features, maybe_announced_channel))
 			};
 
-		// Final hop: fee_msat carries the delivery amount; cltv delta is zero.
+		// Final hop: fee_msat carries the delivery amount; cltv_expiry_delta carries the
+		// destination's final CLTV (matching LDK's shifted-by-one RouteHop convention).
 		{
 			let (node_id, via_scid, pubkey) = route[last];
 			let (node_features, channel_features, maybe_announced_channel) =
@@ -583,7 +584,7 @@ impl RandomStrategy {
 				short_channel_id: via_scid,
 				channel_features,
 				fee_msat: amount_msat,
-				cltv_expiry_delta: 0,
+				cltv_expiry_delta: DEFAULT_MIN_FINAL_CLTV_EXPIRY_DELTA as u32,
 				maybe_announced_channel,
 			});
 		}
