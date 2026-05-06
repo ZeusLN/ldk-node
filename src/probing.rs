@@ -127,6 +127,7 @@ impl ProbingConfigBuilder {
 	/// Start building a config that probes via random graph walks.
 	///
 	/// `max_hops` is the upper bound on the number of hops in a randomly constructed path.
+	/// Values below `2` are clamped to `2`.
 	pub fn random_walk(max_hops: usize) -> Self {
 		Self::with_kind(ProbingStrategyKind::Random { max_hops })
 	}
@@ -219,6 +220,7 @@ impl ArcedProbingConfigBuilder {
 	/// Creates a builder configured to probe via random graph walks.
 	///
 	/// `max_hops` is the upper bound on the number of hops in a randomly constructed path.
+	/// Values below `2` are clamped to `2`.
 	#[uniffi::constructor]
 	pub fn new_random_walk(max_hops: u64) -> Arc<Self> {
 		Arc::new(Self { inner: RwLock::new(ProbingConfigBuilder::random_walk(max_hops as usize)) })
@@ -439,7 +441,7 @@ impl RandomStrategy {
 		Self {
 			network_graph,
 			channel_manager,
-			max_hops: max_hops.clamp(1, MAX_PATH_LENGTH_ESTIMATE as usize),
+			max_hops: max_hops.clamp(2, MAX_PATH_LENGTH_ESTIMATE as usize),
 			min_amount_msat,
 			max_amount_msat,
 		}
@@ -633,7 +635,7 @@ impl RandomStrategy {
 
 impl ProbingStrategy for RandomStrategy {
 	fn next_probe(&self) -> Option<Path> {
-		let target_hops = random_range(1, self.max_hops as u64) as usize;
+		let target_hops = random_range(2, self.max_hops as u64) as usize;
 		let amount_msat = random_range(self.min_amount_msat, self.max_amount_msat);
 
 		self.try_build_path(target_hops, amount_msat)
