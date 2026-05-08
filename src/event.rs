@@ -1191,20 +1191,12 @@ where
 			LdkEvent::PaymentPathFailed { .. } => {},
 			LdkEvent::ProbeSuccessful { path, payment_id, .. } => {
 				if let Some(prober) = &self.prober {
-					if let Some(amount) =
-						prober.inflight_probes.lock().expect("lock").remove(&payment_id)
-					{
-						prober.handle_background_probe_successful(&path, amount);
-					}
+					prober.handle_background_probe_successful(&path, payment_id);
 				}
 			},
 			LdkEvent::ProbeFailed { path, payment_id, .. } => {
 				if let Some(prober) = &self.prober {
-					if let Some(amount) =
-						prober.inflight_probes.lock().expect("lock").remove(&payment_id)
-					{
-						prober.handle_background_probe_failed(&path, amount);
-					}
+					prober.handle_background_probe_failed(&path, payment_id);
 				}
 			},
 			LdkEvent::HTLCHandlingFailed { failure_type, .. } => {

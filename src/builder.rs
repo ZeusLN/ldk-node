@@ -10,7 +10,6 @@ use std::convert::TryInto;
 use std::default::Default;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, Once, RwLock};
 use std::time::SystemTime;
 use std::{fmt, fs};
@@ -1146,7 +1145,9 @@ impl ArcedNodeBuilder {
 
 	/// Configures background probing.
 	///
-	/// See [`ProbingConfig`] for details.
+	/// Use [`ProbingConfigBuilder`] to build the configuration.
+	///
+	/// [`ProbingConfigBuilder`]: crate::probing::ProbingConfigBuilder
 	pub fn set_probing_config(&self, config: Arc<ProbingConfig>) {
 		self.inner.write().expect("lock").set_probing_config((*config).clone());
 	}
@@ -2111,8 +2112,6 @@ fn build_with_store_internal(
 			strategy,
 			interval: probing_cfg.interval,
 			max_locked_msat: probing_cfg.max_locked_msat,
-			locked_msat: Arc::new(AtomicU64::new(0)),
-			inflight_probes: Mutex::new(HashMap::new()),
 		})
 	});
 

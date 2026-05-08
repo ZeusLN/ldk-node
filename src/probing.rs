@@ -62,15 +62,15 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "uniffi")]
 use std::sync::RwLock;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bitcoin::secp256k1::PublicKey;
-use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::channelmanager::{PaymentId, RecentPaymentDetails};
 use lightning::routing::gossip::NodeId;
+use lightning::routing::router::Router as LdkRouter;
 use lightning::routing::router::{
 	Path, PaymentParameters, RouteHop, RouteParameters, MAX_PATH_LENGTH_ESTIMATE,
 };
@@ -84,8 +84,6 @@ use crate::config::{
 use crate::logger::{log_debug, LdkLogger, Logger};
 use crate::types::{ChannelManager, Graph, Router};
 use crate::util::random_range;
-
-use lightning::routing::router::Router as LdkRouter;
 
 /// Which built-in probing strategy to use, or a custom one.
 #[derive(Clone)]
@@ -287,7 +285,7 @@ pub struct ArcedProbingConfigBuilder {
 #[cfg(feature = "uniffi")]
 #[uniffi::export]
 impl ArcedProbingConfigBuilder {
-	/// Creates a builder configured to probe toward the highest-degree nodes in the graph.
+	/// Start building a config that probes toward the highest-degree nodes in the graph.
 	///
 	/// `top_node_count` controls how many of the most-connected nodes are cycled through.
 	#[uniffi::constructor]
@@ -297,7 +295,7 @@ impl ArcedProbingConfigBuilder {
 		})
 	}
 
-	/// Creates a builder configured to probe via random graph walks.
+	/// Start building a config that probes via random graph walks.
 	///
 	/// `max_hops` is the upper bound on the number of hops in a randomly constructed path.
 	/// Values below `2` are clamped to `2`.
@@ -306,7 +304,9 @@ impl ArcedProbingConfigBuilder {
 		Arc::new(Self { inner: RwLock::new(ProbingConfigBuilder::random_walk(max_hops as usize)) })
 	}
 
-	/// Overrides the interval between probe attempts. Defaults to 10 seconds.
+	/// Overrides the interval between probe attempts.
+	///
+	/// Defaults to 10 seconds.
 	pub fn set_interval(&self, secs: u64) {
 		self.inner.write().expect("lock").interval(Duration::from_secs(secs));
 	}
@@ -324,6 +324,10 @@ impl ArcedProbingConfigBuilder {
 	/// encouraging path diversity during background probing. The penalty decays
 	/// quadratically over 24 hours.
 	///
+	/// This is only useful for probing strategies that route through the scorer
+	/// (e.g., [`HighDegreeStrategy`]). Strategies that build paths manually
+	/// (e.g., [`RandomStrategy`]) bypass the scorer entirely.
+	///
 	/// If unset, LDK's default of `0` (no penalty) is used.
 	pub fn set_diversity_penalty_msat(&self, penalty_msat: u64) {
 		self.inner.write().expect("lock").diversity_penalty_msat(penalty_msat);
@@ -331,7 +335,7 @@ impl ArcedProbingConfigBuilder {
 
 	/// Sets how long a probed node stays ineligible before being probed again.
 	///
-	/// Only applies to the high-degree strategy. Defaults to 1 hour.
+	/// Only applies to [`HighDegreeStrategy`]. Defaults to 1 hour.
 	pub fn set_cooldown(&self, secs: u64) {
 		self.inner.write().expect("lock").cooldown(Duration::from_secs(secs));
 	}
@@ -737,8 +741,6 @@ pub struct Prober {
 	pub interval: Duration,
 	/// Maximum total millisatoshis that may be locked in in-flight probes at any time.
 	pub max_locked_msat: u64,
-	pub(crate) locked_msat: Arc<AtomicU64>,
-	pub(crate) inflight_probes: Mutex<HashMap<PaymentId, u64>>,
 }
 
 fn fmt_path(path: &lightning::routing::router::Path) -> String {
@@ -752,37 +754,33 @@ fn fmt_path(path: &lightning::routing::router::Path) -> String {
 impl Prober {
 	/// Returns the total millisatoshis currently locked in in-flight probes.
 	pub fn locked_msat(&self) -> u64 {
-		self.locked_msat.load(Ordering::Relaxed)
+		return self
+			.channel_manager
+			.list_recent_payments()
+			.into_iter()
+			.filter_map(|p| match p {
+				RecentPaymentDetails::Pending { is_probe: true, total_msat, .. } => {
+					Some(total_msat)
+				},
+				_ => None,
+			})
+			.sum();
 	}
 
-	pub(crate) fn handle_background_probe_successful(&self, path: &Path, amount: u64) {
-		let prev = self
-			.locked_msat
-			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(amount)))
-			.expect("fetch_update closure always returns Some");
-		let new = prev.saturating_sub(amount);
+	pub(crate) fn handle_background_probe_successful(&self, path: &Path, payment_id: PaymentId) {
 		log_debug!(
 			self.logger,
-			"Probe successful: released {} msat (locked_msat {} -> {}), path: {}",
-			amount,
-			prev,
-			new,
+			"Background probe with payment_id: {} succeeded along the path: {}",
+			payment_id,
 			fmt_path(path)
 		);
 	}
 
-	pub(crate) fn handle_background_probe_failed(&self, path: &Path, amount: u64) {
-		let prev = self
-			.locked_msat
-			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(amount)))
-			.expect("fetch_update closure always returns Some");
-		let new = prev.saturating_sub(amount);
+	pub(crate) fn handle_background_probe_failed(&self, path: &Path, payment_id: PaymentId) {
 		log_debug!(
 			self.logger,
-			"Probe failed: released {} msat (locked_msat {} -> {}), path: {}",
-			amount,
-			prev,
-			new,
+			"Background probe with payment_id: {} failed along the path: {}",
+			payment_id,
 			fmt_path(path)
 		);
 	}
@@ -806,32 +804,24 @@ pub(crate) async fn run_prober(prober: Arc<Prober>, mut stop_rx: tokio::sync::wa
 					None => continue,
 				};
 				let amount: u64 = path.hops.iter().map(|h| h.fee_msat).sum();
-				if prober.locked_msat.load(Ordering::Acquire) + amount > prober.max_locked_msat {
+				if prober.locked_msat() + amount > prober.max_locked_msat {
 					log_debug!(prober.logger, "Skipping probe: locked-msat budget exceeded.");
 					continue;
 				}
-				// Hold `inflight_probes` across `send_probe` so the event handler in
-				// `event.rs` (which acquires the same lock to remove the entry) cannot
-				// observe a `ProbeSuccessful`/`ProbeFailed` for a payment_id we have not
-				// yet inserted, which would leave `locked_msat` permanently incremented.
-				let mut inflight = prober.inflight_probes.lock().expect("lock");
 				match prober.channel_manager.send_probe(path.clone()) {
 					Ok((_, payment_id)) => {
-						inflight.insert(payment_id, amount);
-						prober.locked_msat.fetch_add(amount, Ordering::Release);
-						drop(inflight);
 						log_debug!(
 							prober.logger,
-							"Probe sent: locked {} msat, path: {}",
+							"Background probe with payment_id {} sent: locked {} msat, path: {}",
+							payment_id,
 							amount,
 							fmt_path(&path)
 						);
 					}
 					Err(e) => {
-						drop(inflight);
 						log_debug!(
 							prober.logger,
-							"Probe send failed: {:?}, path: {}",
+							"Background probe send failed: {:?}, path: {}",
 							e,
 							fmt_path(&path)
 						);
