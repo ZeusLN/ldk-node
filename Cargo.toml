@@ -136,6 +136,25 @@ check-cfg = [
 name = "payments"
 harness = false
 
+# DROPME BUMP: redirect rust-lightning to a fork carrying a cherry-pick of
+# upstream LDK#4603 ("Expose probe status in recent payments"), which adds
+# `is_probe` to `RecentPaymentDetails::Pending`/`Abandoned`. Required by the
+# probing service. Drop this block once LDK#4603 is merged into LDK and
+# ldk-node `main` bumps past that commit.
+[patch."https://github.com/lightningdevkit/rust-lightning"]
+lightning = { git = "https://github.com/randomlogin/rust-lightning", rev = "992754573475740b4e406a45c5780b3d86847a93" }
+lightning-types = { git = "https://github.com/randomlogin/rust-lightning", rev = "992754573475740b4e406a45c5780b3d86847a93" }
+lightning-invoice = { git = "https://github.com/randomlogin/rust-lightning", rev = "992754573475740b4e406a45c5780b3d86847a93" }
+lightning-net-tokio = { git = "https://github.com/randomlogin/rust-lightning", rev = "992754573475740b4e406a45c5780b3d86847a93" }
+lightning-persister = { git = "https://github.com/randomlogin/rust-lightning", rev = "992754573475740b4e406a45c5780b3d86847a93" }
+lightning-background-processor = { git = "https://github.com/randomlogin/rust-lightning", rev = "992754573475740b4e406a45c5780b3d86847a93" }
+lightning-rapid-gossip-sync = { git = "https://github.com/randomlogin/rust-lightning", rev = "992754573475740b4e406a45c5780b3d86847a93" }
+lightning-block-sync = { git = "https://github.com/randomlogin/rust-lightning", rev = "992754573475740b4e406a45c5780b3d86847a93" }
+lightning-transaction-sync = { git = "https://github.com/randomlogin/rust-lightning", rev = "992754573475740b4e406a45c5780b3d86847a93" }
+lightning-liquidity = { git = "https://github.com/randomlogin/rust-lightning", rev = "992754573475740b4e406a45c5780b3d86847a93" }
+lightning-macros = { git = "https://github.com/randomlogin/rust-lightning", rev = "992754573475740b4e406a45c5780b3d86847a93" }
+lightning-dns-resolver = { git = "https://github.com/randomlogin/rust-lightning", rev = "992754573475740b4e406a45c5780b3d86847a93" }
+
 #[patch.crates-io]
 #lightning = { path = "../rust-lightning/lightning" }
 #lightning-types = { path = "../rust-lightning/lightning-types" }
