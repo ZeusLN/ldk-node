@@ -18,7 +18,7 @@ use lightning::util::persist::{
 	KVStore, KVStoreSync, PageToken, PaginatedKVStore, PaginatedKVStoreSync, PaginatedListResponse,
 };
 use lightning_types::string::PrintableString;
-use rusqlite::{named_params, Connection};
+use rusqlite::{limits::Limit, named_params, Connection};
 
 use crate::io::utils::check_namespace_key_validity;
 
@@ -286,6 +286,11 @@ impl SqliteStoreInner {
 				format!("Failed to open/create database file {}: {}", db_file_path.display(), e);
 			io::Error::new(io::ErrorKind::Other, msg)
 		})?;
+
+		// Raise the runtime blob/string limit to SQLite's compile-time maximum so
+		// high-traffic ChannelMonitor blobs aren't capped below the actual ceiling.
+		// SQLite silently clamps to its compiled SQLITE_MAX_LENGTH.
+		connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, i32::MAX);
 
 		let sql = format!("SELECT user_version FROM pragma_user_version");
 		let version_res: u16 = connection.query_row(&sql, [], |row| row.get(0)).map_err(|e| {
