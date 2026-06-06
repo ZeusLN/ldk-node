@@ -136,9 +136,17 @@ impl Readable for PaymentDetails {
 						secret,
 						counterparty_skimmed_fee_msat,
 						lsp_fee_limits,
+						bolt11_invoice: None,
+						description: None,
 					}
 				} else {
-					PaymentKind::Bolt11 { hash, preimage, secret }
+					PaymentKind::Bolt11 {
+						hash,
+						preimage,
+						secret,
+						bolt11_invoice: None,
+						description: None,
+					}
 				}
 			} else {
 				PaymentKind::Spontaneous { hash, preimage }
@@ -362,6 +370,17 @@ pub enum PaymentKind {
 		preimage: Option<PaymentPreimage>,
 		/// The secret used by the payment.
 		secret: Option<PaymentSecret>,
+		/// The original BOLT 11 invoice string, retained so consumers can re-display the
+		/// invoice (memo, expiry, payee, etc.) after the fact.
+		///
+		/// Will always be `None` for payments persisted before this field was introduced.
+		bolt11_invoice: Option<String>,
+		/// The description tag from the BOLT 11 invoice.
+		///
+		/// `Some` when the invoice carried a direct (cleartext) description, `None` when it
+		/// carried a `description_hash` instead or was persisted before this field was
+		/// introduced.
+		description: Option<String>,
 	},
 	/// A [BOLT 11] payment intended to open an [bLIP-52 / LSPS 2] just-in-time channel.
 	///
@@ -389,6 +408,17 @@ pub enum PaymentKind {
 		///
 		/// [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
 		lsp_fee_limits: LSPFeeLimits,
+		/// The original BOLT 11 invoice string, retained so consumers can re-display the
+		/// invoice (memo, expiry, payee, etc.) after the fact.
+		///
+		/// Will always be `None` for payments persisted before this field was introduced.
+		bolt11_invoice: Option<String>,
+		/// The description tag from the BOLT 11 invoice.
+		///
+		/// `Some` when the invoice carried a direct (cleartext) description, `None` when it
+		/// carried a `description_hash` instead or was persisted before this field was
+		/// introduced.
+		description: Option<String>,
 	},
 	/// A [BOLT 12] 'offer' payment, i.e., a payment for an [`Offer`].
 	///
@@ -454,6 +484,8 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 		(0, hash, required),
 		(2, preimage, option),
 		(4, secret, option),
+		(6, bolt11_invoice, option),
+		(8, description, option),
 	},
 	(4, Bolt11Jit) => {
 		(0, hash, required),
@@ -461,6 +493,8 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 		(2, preimage, option),
 		(4, secret, option),
 		(6, lsp_fee_limits, required),
+		(8, bolt11_invoice, option),
+		(10, description, option),
 	},
 	(6, Bolt12Offer) => {
 		(0, hash, option),
@@ -669,10 +703,18 @@ mod tests {
 			);
 
 			match bolt11_decoded.kind {
-				PaymentKind::Bolt11 { hash: h, preimage: p, secret: s } => {
+				PaymentKind::Bolt11 {
+					hash: h,
+					preimage: p,
+					secret: s,
+					bolt11_invoice: b,
+					description: d,
+				} => {
 					assert_eq!(hash, h);
 					assert_eq!(preimage, p);
 					assert_eq!(secret, s);
+					assert_eq!(None, b);
+					assert_eq!(None, d);
 				},
 				_ => {
 					panic!("Unexpected kind!");
@@ -718,12 +760,16 @@ mod tests {
 					secret: s,
 					counterparty_skimmed_fee_msat: c,
 					lsp_fee_limits: l,
+					bolt11_invoice: b,
+					description: d,
 				} => {
 					assert_eq!(hash, h);
 					assert_eq!(preimage, p);
 					assert_eq!(secret, s);
 					assert_eq!(None, c);
 					assert_eq!(lsp_fee_limits, Some(l));
+					assert_eq!(None, b);
+					assert_eq!(None, d);
 				},
 				_ => {
 					panic!("Unexpected kind!");
