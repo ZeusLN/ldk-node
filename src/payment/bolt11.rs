@@ -47,6 +47,15 @@ type Bolt11InvoiceDescription = LdkBolt11InvoiceDescription;
 #[cfg(feature = "uniffi")]
 type Bolt11InvoiceDescription = crate::ffi::Bolt11InvoiceDescription;
 
+/// Extracts the direct (cleartext) description from a BOLT 11 invoice, returning `None` when
+/// the invoice carries a `description_hash` instead.
+fn invoice_description_str(invoice: &LdkBolt11Invoice) -> Option<String> {
+	match invoice.description() {
+		lightning_invoice::Bolt11InvoiceDescriptionRef::Direct(d) => Some(d.to_string()),
+		lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(_) => None,
+	}
+}
+
 /// A payment handler allowing to create and pay [BOLT 11] invoices.
 ///
 /// Should be retrieved by calling [`Node::bolt11_payment`].
@@ -130,6 +139,8 @@ impl Bolt11Payment {
 					hash: payment_hash,
 					preimage: None,
 					secret: payment_secret,
+					bolt11_invoice: Some(invoice.to_string()),
+					description: invoice_description_str(invoice),
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -159,6 +170,8 @@ impl Bolt11Payment {
 							hash: payment_hash,
 							preimage: None,
 							secret: payment_secret,
+							bolt11_invoice: Some(invoice.to_string()),
+							description: invoice_description_str(invoice),
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -240,6 +253,8 @@ impl Bolt11Payment {
 					hash: payment_hash,
 					preimage: None,
 					secret: payment_secret,
+					bolt11_invoice: Some(invoice.to_string()),
+					description: invoice_description_str(invoice),
 				};
 
 				let payment = PaymentDetails::new(
@@ -270,6 +285,8 @@ impl Bolt11Payment {
 							hash: payment_hash,
 							preimage: None,
 							secret: payment_secret,
+							bolt11_invoice: Some(invoice.to_string()),
+							description: invoice_description_str(invoice),
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -513,6 +530,8 @@ impl Bolt11Payment {
 			hash: payment_hash,
 			preimage,
 			secret: Some(payment_secret.clone()),
+			bolt11_invoice: Some(invoice.to_string()),
+			description: invoice_description_str(&invoice),
 		};
 		let payment = PaymentDetails::new(
 			id,
@@ -727,6 +746,8 @@ impl Bolt11Payment {
 			secret: Some(payment_secret.clone()),
 			counterparty_skimmed_fee_msat: None,
 			lsp_fee_limits,
+			bolt11_invoice: Some(invoice.to_string()),
+			description: invoice_description_str(&invoice),
 		};
 		let payment = PaymentDetails::new(
 			id,
