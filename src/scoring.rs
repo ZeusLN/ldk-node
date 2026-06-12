@@ -96,7 +96,7 @@ async fn sync_external_scores(
 
 			let duration_since_epoch =
 				SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-			scorer.lock().unwrap().merge(liquidities, duration_since_epoch);
+			scorer.lock().unwrap().set_scores(liquidities);
 			let mut locked_node_metrics = node_metrics.write().unwrap();
 			locked_node_metrics.latest_pathfinding_scores_sync_timestamp =
 				Some(duration_since_epoch.as_secs());

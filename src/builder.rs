@@ -27,10 +27,7 @@ use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};
 use lightning::log_trace;
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::DefaultRouter;
-use lightning::routing::scoring::{
-	CombinedScorer, ProbabilisticScorer, ProbabilisticScoringDecayParameters,
-	ProbabilisticScoringFeeParameters,
-};
+use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
 use lightning::sign::{EntropySource, NodeSigner};
 use lightning::util::persist::{
 	KVStoreSync, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -1485,13 +1482,13 @@ fn build_with_store_internal(
 		},
 	};
 
-	let scorer = Arc::new(Mutex::new(CombinedScorer::new(local_scorer)));
+	let scorer = Arc::new(Mutex::new(crate::scorer::BimodalScorer::new(local_scorer)));
 
 	// Restore external pathfinding scores from cache if possible.
 	match read_external_pathfinding_scores_from_cache(Arc::clone(&kv_store), Arc::clone(&logger)) {
 		Ok(external_scores) => {
-			scorer.lock().unwrap().merge(external_scores, cur_time);
-			log_trace!(logger, "External scores from cache merged successfully");
+			scorer.lock().unwrap().set_scores(external_scores);
+			log_trace!(logger, "External scores from cache loaded successfully");
 		},
 		Err(e) => {
 			if e.kind() != std::io::ErrorKind::NotFound {
@@ -1501,13 +1498,13 @@ fn build_with_store_internal(
 		},
 	}
 
-	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
+	let scoring_params = crate::scorer::BimodalScoringParameters::default();
 	let router = Arc::new(DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
 		Arc::clone(&keys_manager),
 		Arc::clone(&scorer),
-		scoring_fee_params,
+		scoring_params,
 	));
 
 	let mut user_config = default_user_config(&config);

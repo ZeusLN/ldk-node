@@ -20,7 +20,6 @@ use lightning::ln::peer_handler::IgnoringMessageHandler;
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
-use lightning::routing::scoring::{CombinedScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
 use lightning::util::persist::{KVStore, KVStoreSync, MonitorUpdatingPersister};
 use lightning::util::ser::{Readable, Writeable, Writer};
@@ -247,10 +246,10 @@ pub(crate) type Router = DefaultRouter<
 	Arc<Logger>,
 	Arc<KeysManager>,
 	Arc<Mutex<Scorer>>,
-	ProbabilisticScoringFeeParameters,
+	crate::scorer::BimodalScoringParameters,
 	Scorer,
 >;
-pub(crate) type Scorer = CombinedScorer<Arc<Graph>, Arc<Logger>>;
+pub(crate) type Scorer = crate::scorer::BimodalScorer<Arc<Graph>, Arc<Logger>>;
 
 pub(crate) type Graph = gossip::NetworkGraph<Arc<Logger>>;
 
