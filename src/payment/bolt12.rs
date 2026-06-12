@@ -23,7 +23,7 @@ use lightning::util::ser::{Readable, Writeable};
 use lightning_types::string::UntrustedString;
 use rand::RngCore;
 
-use crate::config::{AsyncPaymentsRole, Config, LDK_PAYMENT_RETRY_TIMEOUT};
+use crate::config::{AsyncPaymentsRole, Config};
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
@@ -91,7 +91,8 @@ impl Bolt12Payment {
 		let mut random_bytes = [0u8; 32];
 		rand::rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_strategy =
+			Retry::Timeout(Duration::from_secs(self.config.payment_retry_timeout_secs));
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 
@@ -203,7 +204,8 @@ impl Bolt12Payment {
 		let mut random_bytes = [0u8; 32];
 		rand::rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_strategy =
+			Retry::Timeout(Duration::from_secs(self.config.payment_retry_timeout_secs));
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 
@@ -428,7 +430,8 @@ impl Bolt12Payment {
 		let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
 			.duration_since(UNIX_EPOCH)
 			.unwrap();
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_strategy =
+			Retry::Timeout(Duration::from_secs(self.config.payment_retry_timeout_secs));
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 

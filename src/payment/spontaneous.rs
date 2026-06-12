@@ -8,6 +8,7 @@
 //! Holds a payment handler allowing to send spontaneous ("keysend") payments.
 
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, RetryableSendFailure};
@@ -15,7 +16,7 @@ use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParame
 use lightning::sign::EntropySource;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
-use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
+use crate::config::Config;
 use crate::error::Error;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
@@ -140,7 +141,7 @@ impl SpontaneousPayment {
 			recipient_fields,
 			PaymentId(payment_hash.0),
 			route_params,
-			Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT),
+			Retry::Timeout(Duration::from_secs(self.config.payment_retry_timeout_secs)),
 		) {
 			Ok(_hash) => {
 				log_info!(self.logger, "Initiated sending {}msat to {}.", amount_msat, node_id);
