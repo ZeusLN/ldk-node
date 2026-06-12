@@ -10,6 +10,7 @@
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -22,7 +23,7 @@ use lightning_invoice::{
 };
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
-use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
+use crate::config::Config;
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
 use crate::error::Error;
@@ -120,7 +121,8 @@ impl Bolt11Payment {
 
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_strategy =
+			Retry::Timeout(Duration::from_secs(self.config.payment_retry_timeout_secs));
 		let payment_secret = Some(*invoice.payment_secret());
 
 		match self.channel_manager.pay_for_bolt11_invoice(
@@ -230,7 +232,8 @@ impl Bolt11Payment {
 
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_strategy =
+			Retry::Timeout(Duration::from_secs(self.config.payment_retry_timeout_secs));
 		let payment_secret = Some(*invoice.payment_secret());
 
 		match self.channel_manager.pay_for_bolt11_invoice(

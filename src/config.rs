@@ -28,6 +28,7 @@ const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
 const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
+const DEFAULT_PAYMENT_RETRY_TIMEOUT_SECS: u64 = 10;
 
 /// The default log level.
 pub const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Debug;
@@ -50,9 +51,6 @@ pub(crate) const BDK_CLIENT_STOP_GAP: usize = 20;
 
 // The number of concurrent requests made against the API provider.
 pub(crate) const BDK_CLIENT_CONCURRENCY: usize = 4;
-
-// The timeout after which we abandon retrying failed payments.
-pub(crate) const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 
 // The interval (in block height) after which we retry archiving fully resolved channel monitors.
 pub(crate) const RESOLVED_CHANNEL_MONITOR_ARCHIVAL_INTERVAL: u32 = 6;
@@ -121,6 +119,7 @@ pub(crate) const EXTERNAL_PATHFINDING_SCORES_SYNC_TIMEOUT_SECS: u64 = 5;
 /// | `log_level`                            | Debug              |
 /// | `anchor_channels_config`               | Some(..)           |
 /// | `route_parameters`                   | None               |
+/// | `payment_retry_timeout_secs`          | 10                 |
 ///
 /// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
 /// respective default values.
@@ -185,6 +184,14 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub route_parameters: Option<RouteParametersConfig>,
+	/// The maximum time in seconds that the node will spend retrying a failed payment before giving up.
+	///
+	/// Each failed HTLC attempt causes the scorer to penalize the failing channel and pick a new
+	/// route, repeating until this timeout elapses. A longer timeout allows more retry attempts on
+	/// slow or congested paths; a shorter timeout returns failure to the caller more quickly.
+	///
+	/// Defaults to 10 seconds.
+	pub payment_retry_timeout_secs: u64,
 }
 
 impl Default for Config {
@@ -199,6 +206,7 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			route_parameters: None,
 			node_alias: None,
+			payment_retry_timeout_secs: DEFAULT_PAYMENT_RETRY_TIMEOUT_SECS,
 		}
 	}
 }
