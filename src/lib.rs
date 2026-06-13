@@ -1370,7 +1370,7 @@ impl Node {
 	}
 
 	fn estimate_max_channel_amount(
-		&self, peer_node_id: &PublicKey, utxos: Option<&[OutPoint]>,
+		&self, _peer_node_id: &PublicKey, utxos: Option<&[OutPoint]>,
 	) -> Result<u64, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
