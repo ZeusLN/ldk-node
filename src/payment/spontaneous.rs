@@ -8,6 +8,7 @@
 //! Holds a payment handler allowing to send spontaneous ("keysend") payments.
 
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry, RetryableSendFailure};
@@ -53,39 +54,62 @@ impl SpontaneousPayment {
 	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
 	pub fn send(
 		&self, amount_msat: u64, node_id: PublicKey,
-		route_parameters: Option<RouteParametersConfig>,
+		route_parameters: Option<RouteParametersConfig>, payment_timeout_secs: Option<u64>,
 	) -> Result<PaymentId, Error> {
-		self.send_inner(amount_msat, node_id, route_parameters, None, None)
+		self.send_inner(amount_msat, node_id, route_parameters, None, None, payment_timeout_secs)
 	}
 
 	/// Send a spontaneous payment including a list of custom TLVs.
 	pub fn send_with_custom_tlvs(
 		&self, amount_msat: u64, node_id: PublicKey,
 		route_parameters: Option<RouteParametersConfig>, custom_tlvs: Vec<CustomTlvRecord>,
+		payment_timeout_secs: Option<u64>,
 	) -> Result<PaymentId, Error> {
-		self.send_inner(amount_msat, node_id, route_parameters, Some(custom_tlvs), None)
+		self.send_inner(
+			amount_msat,
+			node_id,
+			route_parameters,
+			Some(custom_tlvs),
+			None,
+			payment_timeout_secs,
+		)
 	}
 
 	/// Send a spontaneous payment with custom preimage
 	pub fn send_with_preimage(
 		&self, amount_msat: u64, node_id: PublicKey, preimage: PaymentPreimage,
-		route_parameters: Option<RouteParametersConfig>,
+		route_parameters: Option<RouteParametersConfig>, payment_timeout_secs: Option<u64>,
 	) -> Result<PaymentId, Error> {
-		self.send_inner(amount_msat, node_id, route_parameters, None, Some(preimage))
+		self.send_inner(
+			amount_msat,
+			node_id,
+			route_parameters,
+			None,
+			Some(preimage),
+			payment_timeout_secs,
+		)
 	}
 
 	/// Send a spontaneous payment with custom preimage including a list of custom TLVs.
 	pub fn send_with_preimage_and_custom_tlvs(
 		&self, amount_msat: u64, node_id: PublicKey, custom_tlvs: Vec<CustomTlvRecord>,
 		preimage: PaymentPreimage, route_parameters: Option<RouteParametersConfig>,
+		payment_timeout_secs: Option<u64>,
 	) -> Result<PaymentId, Error> {
-		self.send_inner(amount_msat, node_id, route_parameters, Some(custom_tlvs), Some(preimage))
+		self.send_inner(
+			amount_msat,
+			node_id,
+			route_parameters,
+			Some(custom_tlvs),
+			Some(preimage),
+			payment_timeout_secs,
+		)
 	}
 
 	fn send_inner(
 		&self, amount_msat: u64, node_id: PublicKey,
 		route_parameters: Option<RouteParametersConfig>, custom_tlvs: Option<Vec<CustomTlvRecord>>,
-		preimage: Option<PaymentPreimage>,
+		preimage: Option<PaymentPreimage>, payment_timeout_secs: Option<u64>,
 	) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -140,7 +164,9 @@ impl SpontaneousPayment {
 			recipient_fields,
 			PaymentId(payment_hash.0),
 			route_params,
-			Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT),
+			Retry::Timeout(
+			payment_timeout_secs.map(Duration::from_secs).unwrap_or(LDK_PAYMENT_RETRY_TIMEOUT),
+		),
 		) {
 			Ok(_hash) => {
 				log_info!(self.logger, "Initiated sending {}msat to {}.", amount_msat, node_id);

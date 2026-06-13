@@ -10,6 +10,7 @@
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -101,6 +102,7 @@ impl Bolt11Payment {
 	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
 	pub fn send(
 		&self, invoice: &Bolt11Invoice, route_parameters: Option<RouteParametersConfig>,
+		payment_timeout_secs: Option<u64>,
 	) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -120,7 +122,9 @@ impl Bolt11Payment {
 
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_timeout =
+			payment_timeout_secs.map(Duration::from_secs).unwrap_or(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_strategy = Retry::Timeout(retry_timeout);
 		let payment_secret = Some(*invoice.payment_secret());
 
 		match self.channel_manager.pay_for_bolt11_invoice(
@@ -201,7 +205,7 @@ impl Bolt11Payment {
 	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
 	pub fn send_using_amount(
 		&self, invoice: &Bolt11Invoice, amount_msat: u64,
-		route_parameters: Option<RouteParametersConfig>,
+		route_parameters: Option<RouteParametersConfig>, payment_timeout_secs: Option<u64>,
 	) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -230,7 +234,9 @@ impl Bolt11Payment {
 
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_timeout =
+			payment_timeout_secs.map(Duration::from_secs).unwrap_or(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_strategy = Retry::Timeout(retry_timeout);
 		let payment_secret = Some(*invoice.payment_secret());
 
 		match self.channel_manager.pay_for_bolt11_invoice(
