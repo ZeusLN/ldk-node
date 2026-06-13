@@ -214,9 +214,9 @@ interface Bolt11InvoiceDescription {
 
 interface Bolt11Payment {
 	[Throws=NodeError]
-	PaymentId send([ByRef]Bolt11Invoice invoice, RouteParametersConfig? route_parameters);
+	PaymentId send([ByRef]Bolt11Invoice invoice, RouteParametersConfig? route_parameters, u64? payment_timeout_secs);
 	[Throws=NodeError]
-	PaymentId send_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat, RouteParametersConfig? route_parameters);
+	PaymentId send_using_amount([ByRef]Bolt11Invoice invoice, u64 amount_msat, RouteParametersConfig? route_parameters, u64? payment_timeout_secs);
 	[Throws=NodeError]
 	void send_probes([ByRef]Bolt11Invoice invoice, RouteParametersConfig? route_parameters);
 	[Throws=NodeError]
@@ -245,9 +245,9 @@ interface Bolt11Payment {
 
 interface Bolt12Payment {
 	[Throws=NodeError]
-	PaymentId send([ByRef]Offer offer, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters);
+	PaymentId send([ByRef]Offer offer, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters, u64? payment_timeout_secs);
 	[Throws=NodeError]
-	PaymentId send_using_amount([ByRef]Offer offer, u64 amount_msat, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters);
+	PaymentId send_using_amount([ByRef]Offer offer, u64 amount_msat, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters, u64? payment_timeout_secs);
 	[Throws=NodeError]
 	Offer receive(u64 amount_msat, [ByRef]string description, u32? expiry_secs, u64? quantity);
 	[Throws=NodeError]
@@ -255,7 +255,7 @@ interface Bolt12Payment {
 	[Throws=NodeError]
 	Bolt12Invoice request_refund_payment([ByRef]Refund refund);
 	[Throws=NodeError]
-	Refund initiate_refund(u64 amount_msat, u32 expiry_secs, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters);
+	Refund initiate_refund(u64 amount_msat, u32 expiry_secs, u64? quantity, string? payer_note, RouteParametersConfig? route_parameters, u64? payment_timeout_secs);
 	[Throws=NodeError]
 	Offer receive_async();
 	[Throws=NodeError]
@@ -266,13 +266,13 @@ interface Bolt12Payment {
 
 interface SpontaneousPayment {
 	[Throws=NodeError]
-	PaymentId send(u64 amount_msat, PublicKey node_id, RouteParametersConfig? route_parameters);
+	PaymentId send(u64 amount_msat, PublicKey node_id, RouteParametersConfig? route_parameters, u64? payment_timeout_secs);
 	[Throws=NodeError]
-	PaymentId send_with_custom_tlvs(u64 amount_msat, PublicKey node_id, RouteParametersConfig? route_parameters, sequence<CustomTlvRecord> custom_tlvs);
+	PaymentId send_with_custom_tlvs(u64 amount_msat, PublicKey node_id, RouteParametersConfig? route_parameters, sequence<CustomTlvRecord> custom_tlvs, u64? payment_timeout_secs);
 	[Throws=NodeError]
-	PaymentId send_with_preimage(u64 amount_msat, PublicKey node_id, PaymentPreimage preimage, RouteParametersConfig? route_parameters);
+	PaymentId send_with_preimage(u64 amount_msat, PublicKey node_id, PaymentPreimage preimage, RouteParametersConfig? route_parameters, u64? payment_timeout_secs);
 	[Throws=NodeError]
-	PaymentId send_with_preimage_and_custom_tlvs(u64 amount_msat, PublicKey node_id, sequence<CustomTlvRecord> custom_tlvs, PaymentPreimage preimage, RouteParametersConfig? route_parameters);
+	PaymentId send_with_preimage_and_custom_tlvs(u64 amount_msat, PublicKey node_id, sequence<CustomTlvRecord> custom_tlvs, PaymentPreimage preimage, RouteParametersConfig? route_parameters, u64? payment_timeout_secs);
 	[Throws=NodeError]
 	void send_probes(u64 amount_msat, PublicKey node_id);
 };
@@ -314,7 +314,7 @@ interface UnifiedQrPayment {
 	[Throws=NodeError]
 	string receive(u64 amount_sats, [ByRef]string message, u32 expiry_sec);
 	[Throws=NodeError]
-	QrPaymentResult send([ByRef]string uri_str, RouteParametersConfig? route_parameters);
+	QrPaymentResult send([ByRef]string uri_str, RouteParametersConfig? route_parameters, u64? payment_timeout_secs);
 };
 
 interface LSPS1Liquidity {

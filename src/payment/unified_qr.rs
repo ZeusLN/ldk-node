@@ -144,6 +144,7 @@ impl UnifiedQrPayment {
 	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 	pub fn send(
 		&self, uri_str: &str, route_parameters: Option<RouteParametersConfig>,
+		payment_timeout_secs: Option<u64>,
 	) -> Result<QrPaymentResult, Error> {
 		let uri: bip21::Uri<NetworkUnchecked, Extras> =
 			uri_str.parse().map_err(|_| Error::InvalidUri)?;
@@ -153,7 +154,7 @@ impl UnifiedQrPayment {
 
 		if let Some(offer) = uri_network_checked.extras.bolt12_offer {
 			let offer = maybe_wrap(offer);
-			match self.bolt12_payment.send(&offer, None, None, route_parameters) {
+			match self.bolt12_payment.send(&offer, None, None, route_parameters, payment_timeout_secs) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt12 { payment_id }),
 				Err(e) => log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified QR code payment. Falling back to the BOLT11 invoice.", e),
 			}
@@ -161,7 +162,7 @@ impl UnifiedQrPayment {
 
 		if let Some(invoice) = uri_network_checked.extras.bolt11_invoice {
 			let invoice = maybe_wrap(invoice);
-			match self.bolt11_invoice.send(&invoice, route_parameters) {
+			match self.bolt11_invoice.send(&invoice, route_parameters, payment_timeout_secs) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt11 { payment_id }),
 				Err(e) => log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified QR code payment. Falling back to the on-chain transaction.", e),
 			}

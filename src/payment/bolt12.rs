@@ -80,7 +80,7 @@ impl Bolt12Payment {
 	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
 	pub fn send(
 		&self, offer: &Offer, quantity: Option<u64>, payer_note: Option<String>,
-		route_parameters: Option<RouteParametersConfig>,
+		route_parameters: Option<RouteParametersConfig>, payment_timeout_secs: Option<u64>,
 	) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -91,7 +91,9 @@ impl Bolt12Payment {
 		let mut random_bytes = [0u8; 32];
 		rand::rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_timeout =
+			payment_timeout_secs.map(Duration::from_secs).unwrap_or(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_strategy = Retry::Timeout(retry_timeout);
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 
@@ -192,7 +194,7 @@ impl Bolt12Payment {
 	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
 	pub fn send_using_amount(
 		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
-		route_parameters: Option<RouteParametersConfig>,
+		route_parameters: Option<RouteParametersConfig>, payment_timeout_secs: Option<u64>,
 	) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -203,7 +205,9 @@ impl Bolt12Payment {
 		let mut random_bytes = [0u8; 32];
 		rand::rng().fill_bytes(&mut random_bytes);
 		let payment_id = PaymentId(random_bytes);
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_timeout =
+			payment_timeout_secs.map(Duration::from_secs).unwrap_or(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_strategy = Retry::Timeout(retry_timeout);
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 
@@ -420,6 +424,7 @@ impl Bolt12Payment {
 	pub fn initiate_refund(
 		&self, amount_msat: u64, expiry_secs: u32, quantity: Option<u64>,
 		payer_note: Option<String>, route_parameters: Option<RouteParametersConfig>,
+		payment_timeout_secs: Option<u64>,
 	) -> Result<Refund, Error> {
 		let mut random_bytes = [0u8; 32];
 		rand::rng().fill_bytes(&mut random_bytes);
@@ -428,7 +433,9 @@ impl Bolt12Payment {
 		let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
 			.duration_since(UNIX_EPOCH)
 			.unwrap();
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_timeout =
+			payment_timeout_secs.map(Duration::from_secs).unwrap_or(LDK_PAYMENT_RETRY_TIMEOUT);
+		let retry_strategy = Retry::Timeout(retry_timeout);
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 
