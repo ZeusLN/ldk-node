@@ -42,7 +42,7 @@ use crate::io::{
 	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::liquidity::LiquiditySource;
-use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use crate::payment::store::{
