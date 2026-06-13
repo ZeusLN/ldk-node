@@ -1726,7 +1726,7 @@ async fn unified_qr_send_receive() {
 	// Cut off the BOLT12 part to fallback to BOLT11.
 	let uri_str_without_offer = uri_str.split("&lno=").next().unwrap();
 	let invoice_payment_id: PaymentId =
-		match node_a.unified_qr_payment().send(uri_str_without_offer, None) {
+		match node_a.unified_qr_payment().send(uri_str_without_offer, None, None) {
 			Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
 				panic!("Expected Bolt11 payment but got Bolt12");
 			},
@@ -1744,7 +1744,7 @@ async fn unified_qr_send_receive() {
 	expect_payment_successful_event!(node_a, Some(invoice_payment_id), None);
 
 	// Retrying the same BOLT11 invoice must return DuplicatePayment, not fall back to on-chain.
-	match node_a.unified_qr_payment().send(uri_str_without_offer, None) {
+	match node_a.unified_qr_payment().send(uri_str_without_offer, None, None) {
 		Err(NodeError::DuplicatePayment) => {},
 		Ok(QrPaymentResult::Onchain { txid }) => {
 			panic!("Regression: duplicate BOLT11 payment fell back to on-chain. txid={}", txid);
@@ -1969,7 +1969,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 		assert_eq!(underpayment.recover_payee_pub_key(), client_node.node_id());
 		#[cfg(feature = "uniffi")]
 		let underpayment = Arc::new(underpayment.into());
-		let payment_id = service_node.bolt11_payment().send(&underpayment, None).unwrap();
+		let payment_id = service_node.bolt11_payment().send(&underpayment, None, None).unwrap();
 		tokio::select! {
 			_ = async {
 				expect_event!(service_node, PaymentFailed);
