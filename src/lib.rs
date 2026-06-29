@@ -164,9 +164,11 @@ use runtime::Runtime;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, ClosedChannelStore,
 	DynStore, Graph, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer,
-	Sweeper, Wallet,
+	Sweeper, Wallet, WatchOnlyWallet,
 };
-pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
+pub use types::{
+	AccountId, ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId,
+};
 pub use {
 	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
 	vss_client,
@@ -186,6 +188,7 @@ pub struct Node {
 	background_processor_stop_sender: tokio::sync::watch::Sender<()>,
 	config: Arc<Config>,
 	wallet: Arc<Wallet>,
+	watchonly_wallets: Arc<Mutex<HashMap<AccountId, Arc<WatchOnlyWallet>>>>,
 	chain_source: Arc<ChainSource>,
 	tx_broadcaster: Arc<Broadcaster>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
@@ -951,6 +954,31 @@ impl Node {
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		))
+	}
+
+	/// Imports a watch-only on-chain account from public external and internal
+	/// descriptors, registering it under `account_id`.
+	///
+	/// The descriptors must be public (key-only); a watch-only account holds no
+	/// private keys and signs off-device via PSBT. Re-importing an existing
+	/// `account_id` replaces the previously imported account.
+	pub fn import_watchonly_account(
+		&self, account_id: AccountId, external_descriptor: String, internal_descriptor: String,
+	) -> Result<(), Error> {
+		let wallet =
+			WatchOnlyWallet::import(external_descriptor, internal_descriptor, self.config.network)?;
+		self.watchonly_wallets.lock().unwrap().insert(account_id, Arc::new(wallet));
+		Ok(())
+	}
+
+	/// Reveals the next unused external (receive) address for the watch-only
+	/// account registered under `account_id`.
+	pub fn watchonly_new_address(&self, account_id: &AccountId) -> Result<Address, Error> {
+		let wallet = {
+			let wallets = self.watchonly_wallets.lock().unwrap();
+			wallets.get(account_id).ok_or(Error::WalletOperationFailed)?.clone()
+		};
+		wallet.new_address()
 	}
 
 	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],

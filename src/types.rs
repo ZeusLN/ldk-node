@@ -240,6 +240,7 @@ pub(crate) type ChannelManager = lightning::ln::channelmanager::ChannelManager<
 pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<Logger>>;
 
 pub(crate) type Wallet = crate::wallet::Wallet;
+pub(crate) type WatchOnlyWallet = crate::wallet::watchonly::WatchOnlyWallet;
 pub(crate) type KeysManager = crate::wallet::WalletKeysManager;
 
 pub(crate) type Router = DefaultRouter<
@@ -307,6 +308,10 @@ pub(crate) type BumpTransactionEventHandler =
 
 pub(crate) type PaymentStore = DataStore<PaymentDetails, Arc<Logger>>;
 pub(crate) type ClosedChannelStore = DataStore<ClosedChannelDetails, Arc<Logger>>;
+
+/// A local identifier for an imported watch-only on-chain account.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AccountId(pub String);
 
 /// A local, potentially user-provided, identifier of a channel.
 ///

@@ -1874,6 +1874,7 @@ fn build_with_store_internal(
 		background_processor_stop_sender,
 		config,
 		wallet,
+		watchonly_wallets: Arc::new(Mutex::new(std::collections::HashMap::new())),
 		chain_source,
 		tx_broadcaster,
 		fee_estimator,

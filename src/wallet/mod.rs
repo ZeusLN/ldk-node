@@ -61,6 +61,7 @@ pub(crate) enum OnchainSendAmount {
 
 pub(crate) mod persist;
 pub(crate) mod ser;
+pub(crate) mod watchonly;
 
 pub(crate) struct Wallet {
 	// A BDK on-chain wallet.
