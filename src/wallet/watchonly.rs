@@ -39,6 +39,27 @@ impl WatchOnlyWallet {
 	pub(crate) fn balance(&self) -> u64 {
 		self.inner.lock().unwrap().balance().total().to_sat()
 	}
+
+	pub(crate) fn list_utxos(&self) -> Result<Vec<crate::WalletUtxo>, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let network = locked_wallet.network();
+		let mut result = Vec::new();
+
+		for utxo in locked_wallet.list_unspent() {
+			let address = Address::from_script(&utxo.txout.script_pubkey, network)
+				.map(|a| a.to_string())
+				.unwrap_or_default();
+			result.push(crate::WalletUtxo {
+				txid: utxo.outpoint.txid.to_string(),
+				vout: utxo.outpoint.vout,
+				value_sats: utxo.txout.value.to_sat(),
+				address,
+				is_spent: utxo.is_spent,
+			});
+		}
+
+		Ok(result)
+	}
 }
 
 #[cfg(test)]
@@ -74,5 +95,17 @@ mod tests {
 		.unwrap();
 
 		assert_eq!(wallet.balance(), 0);
+	}
+
+	#[test]
+	fn fresh_account_has_no_utxos() {
+		let wallet = WatchOnlyWallet::import(
+			EXTERNAL_DESCRIPTOR.to_string(),
+			INTERNAL_DESCRIPTOR.to_string(),
+			Network::Testnet,
+		)
+		.unwrap();
+
+		assert!(wallet.list_utxos().unwrap().is_empty());
 	}
 }

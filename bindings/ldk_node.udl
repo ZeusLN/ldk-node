@@ -162,7 +162,9 @@ interface Node {
 	[Throws=NodeError]
 	Address watchonly_new_address([ByRef]AccountId account_id);
 	[Throws=NodeError]
-    u64 watchonly_balance([ByRef]AccountId account_id);
+	u64 watchonly_balance([ByRef]AccountId account_id);
+	[Throws=NodeError]
+	sequence<WalletUtxo> watchonly_list_utxos([ByRef]AccountId account_id);
 	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
 	[Throws=NodeError]
