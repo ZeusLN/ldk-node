@@ -981,6 +981,16 @@ impl Node {
 		wallet.new_address()
 	}
 
+	/// Returns the total balance (in sats) of the watch-only account
+	/// registered under `account_id`.
+	pub fn watchonly_balance(&self, account_id: &AccountId) -> Result<u64, Error> {
+		let wallet = {
+			let wallets = self.watchonly_wallets.lock().unwrap();
+			wallets.get(account_id).ok_or(Error::WalletOperationFailed)?.clone()
+		};
+		Ok(wallet.balance())
+	}
+
 	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
 	/// and [BOLT 12] payment options.
 	///
