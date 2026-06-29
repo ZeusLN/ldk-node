@@ -991,6 +991,16 @@ impl Node {
 		Ok(wallet.balance())
 	}
 
+	/// Lists the unspent outputs (UTXOs) of the watch-only account registered
+	/// under `account_id`.
+	pub fn watchonly_list_utxos(&self, account_id: &AccountId) -> Result<Vec<WalletUtxo>, Error> {
+		let wallet = {
+			let wallets = self.watchonly_wallets.lock().unwrap();
+			wallets.get(account_id).ok_or(Error::WalletOperationFailed)?.clone()
+		};
+		wallet.list_utxos()
+	}
+
 	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
 	/// and [BOLT 12] payment options.
 	///
