@@ -35,6 +35,10 @@ impl WatchOnlyWallet {
 		let address_info = locked_wallet.reveal_next_address(KeychainKind::External);
 		Ok(address_info.address)
 	}
+
+	pub(crate) fn balance(&self) -> u64 {
+		self.inner.lock().unwrap().balance().total().to_sat()
+	}
 }
 
 #[cfg(test)]
@@ -58,5 +62,17 @@ mod tests {
 		let address = wallet.new_address().unwrap();
 
 		assert_eq!(address.to_string(), "tb1q7whne2rauhqkg7pe8dpra6rs5cxgq0429pxn88");
+	}
+
+	#[test]
+	fn fresh_account_has_zero_balance() {
+		let wallet = WatchOnlyWallet::import(
+			EXTERNAL_DESCRIPTOR.to_string(),
+			INTERNAL_DESCRIPTOR.to_string(),
+			Network::Testnet,
+		)
+		.unwrap();
+
+		assert_eq!(wallet.balance(), 0);
 	}
 }
