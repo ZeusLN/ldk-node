@@ -1001,6 +1001,16 @@ impl Node {
 		wallet.list_utxos()
 	}
 
+	/// Lists the revealed receive addresses of the watch-only account
+	/// registered under `account_id`.
+	pub fn watchonly_list_addresses(&self, account_id: &AccountId) -> Result<Vec<Address>, Error> {
+		let wallet = {
+			let wallets = self.watchonly_wallets.lock().unwrap();
+			wallets.get(account_id).ok_or(Error::WalletOperationFailed)?.clone()
+		};
+		Ok(wallet.list_addresses())
+	}
+
 	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
 	/// and [BOLT 12] payment options.
 	///

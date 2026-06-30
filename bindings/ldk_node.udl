@@ -166,6 +166,8 @@ interface Node {
 	[Throws=NodeError]
 	sequence<WalletUtxo> watchonly_list_utxos([ByRef]AccountId account_id);
 	[Throws=NodeError]
+	sequence<Address> watchonly_list_addresses([ByRef]AccountId account_id);
+	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
 	[Throws=NodeError]
 	void disconnect(PublicKey node_id);
