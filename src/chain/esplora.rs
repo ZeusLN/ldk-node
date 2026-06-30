@@ -28,7 +28,7 @@ use crate::fee_estimator::{
 };
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
-use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
+use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet, WatchOnlyWallet};
 use crate::{Error, NodeMetrics};
 
 pub(super) struct EsploraChainSource {
@@ -98,6 +98,42 @@ impl EsploraChainSource {
 		self.onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res.clone());
 
 		res
+	}
+
+	pub(super) async fn sync_watchonly_wallet(
+		&self, wallet: Arc<WatchOnlyWallet>,
+	) -> Result<(), Error> {
+		let now = Instant::now();
+		let full_scan_request = wallet.get_full_scan_request();
+		let update_res = tokio::time::timeout(
+			Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
+			self.esplora_client.full_scan(
+				full_scan_request,
+				BDK_CLIENT_STOP_GAP,
+				BDK_CLIENT_CONCURRENCY,
+			),
+		)
+		.await;
+
+		match update_res {
+			Ok(Ok(update)) => {
+				wallet.apply_update(update)?;
+				log_info!(
+					self.logger,
+					"Sync of watch-only wallet finished in {}ms.",
+					now.elapsed().as_millis()
+				);
+				Ok(())
+			},
+			Ok(Err(e)) => {
+				log_error!(self.logger, "Sync of watch-only wallet failed: {}", e);
+				Err(Error::WalletOperationFailed)
+			},
+			Err(e) => {
+				log_error!(self.logger, "Sync of watch-only wallet timed out: {}", e);
+				Err(Error::WalletOperationTimeout)
+			},
+		}
 	}
 
 	async fn sync_onchain_wallet_inner(&self, onchain_wallet: Arc<Wallet>) -> Result<(), Error> {

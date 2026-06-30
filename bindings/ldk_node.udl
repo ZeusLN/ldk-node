@@ -168,6 +168,8 @@ interface Node {
 	[Throws=NodeError]
 	sequence<Address> watchonly_list_addresses([ByRef]AccountId account_id);
 	[Throws=NodeError]
+	void sync_watchonly_accounts();
+	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
 	[Throws=NodeError]
 	void disconnect(PublicKey node_id);

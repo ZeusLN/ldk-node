@@ -1703,6 +1703,25 @@ impl Node {
 		})
 	}
 
+	/// Syncs the on-chain state of all imported watch-only accounts against the
+	/// configured chain source.
+	pub fn sync_watchonly_accounts(&self) -> Result<(), Error> {
+		if !*self.is_running.read().unwrap() {
+			return Err(Error::NotRunning);
+		}
+
+		let chain_source = Arc::clone(&self.chain_source);
+		let wallets: Vec<Arc<WatchOnlyWallet>> =
+			self.watchonly_wallets.lock().unwrap().values().cloned().collect();
+
+		self.runtime.block_on(async move {
+			for wallet in wallets {
+				chain_source.sync_watchonly_wallet(wallet).await?;
+			}
+			Ok(())
+		})
+	}
+
 	/// Close a previously opened channel.
 	///
 	/// Will attempt to close a channel coopertively. If this fails, users might need to resort to
