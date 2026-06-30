@@ -7,7 +7,8 @@
 
 use std::sync::Mutex;
 
-use bdk_wallet::{KeychainKind, Wallet as BdkWallet};
+use bdk_chain::spk_client::FullScanRequest;
+use bdk_wallet::{KeychainKind, Update, Wallet as BdkWallet};
 use bitcoin::{Address, Network};
 
 use crate::Error;
@@ -71,6 +72,14 @@ impl WatchOnlyWallet {
 		(0..=last_revealed)
 			.map(|index| locked_wallet.peek_address(KeychainKind::External, index).address)
 			.collect()
+	}
+
+	pub(crate) fn get_full_scan_request(&self) -> FullScanRequest<KeychainKind> {
+		self.inner.lock().unwrap().start_full_scan().build()
+	}
+
+	pub(crate) fn apply_update(&self, update: impl Into<Update>) -> Result<(), Error> {
+		self.inner.lock().unwrap().apply_update(update).map_err(|_| Error::WalletOperationFailed)
 	}
 }
 

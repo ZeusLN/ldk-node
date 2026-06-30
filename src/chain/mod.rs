@@ -27,7 +27,9 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
-use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
+use crate::types::{
+	Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet, WatchOnlyWallet,
+};
 use crate::{Error, NodeMetrics};
 
 pub(crate) enum WalletSyncStatus {
@@ -359,6 +361,20 @@ impl ChainSource {
 				// In BitcoindRpc mode we sync lightning and onchain wallet in one go via
 				// `ChainPoller`. So nothing to do here.
 				unreachable!("Onchain wallet will be synced via chain polling")
+			},
+		}
+	}
+
+	pub(crate) async fn sync_watchonly_wallet(
+		&self, wallet: Arc<WatchOnlyWallet>,
+	) -> Result<(), Error> {
+		match &self.kind {
+			ChainSourceKind::Esplora(esplora_chain_source) => {
+				esplora_chain_source.sync_watchonly_wallet(wallet).await
+			},
+			ChainSourceKind::Electrum(_) | ChainSourceKind::Bitcoind { .. } => {
+				// Watch-only account sync is currently only supported via the Esplora chain source.
+				Err(Error::WalletOperationFailed)
 			},
 		}
 	}
