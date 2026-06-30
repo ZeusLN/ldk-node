@@ -60,6 +60,18 @@ impl WatchOnlyWallet {
 
 		Ok(result)
 	}
+
+	pub(crate) fn list_addresses(&self) -> Vec<Address> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let last_revealed = match locked_wallet.derivation_index(KeychainKind::External) {
+			Some(index) => index,
+			None => return Vec::new(),
+		};
+
+		(0..=last_revealed)
+			.map(|index| locked_wallet.peek_address(KeychainKind::External, index).address)
+			.collect()
+	}
 }
 
 #[cfg(test)]
@@ -107,5 +119,22 @@ mod tests {
 		.unwrap();
 
 		assert!(wallet.list_utxos().unwrap().is_empty());
+	}
+
+	#[test]
+	fn lists_revealed_addresses() {
+		let wallet = WatchOnlyWallet::import(
+			EXTERNAL_DESCRIPTOR.to_string(),
+			INTERNAL_DESCRIPTOR.to_string(),
+			Network::Testnet,
+		)
+		.unwrap();
+
+		assert!(wallet.list_addresses().is_empty());
+
+		let first = wallet.new_address().unwrap();
+		let second = wallet.new_address().unwrap();
+
+		assert_eq!(wallet.list_addresses(), vec![first, second]);
 	}
 }
