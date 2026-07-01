@@ -32,7 +32,7 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	QrPaymentResult,
 };
-use ldk_node::{Builder, DynStore, Event, NodeError};
+use ldk_node::{AccountId, Builder, DynStore, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
@@ -110,6 +110,46 @@ async fn channel_full_cycle_legacy_staticremotekey() {
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, false, false)
 		.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn watchonly_account_syncs_balance() {
+	// A BIP84 account xpub 
+	const EXTERNAL_DESCRIPTOR: &str = "wpkh([2de67592/84'/1'/0']tpubDCUJWjpCfXoCzDwWiHRwsALSWYSMXvHHzQ3q4CoiVgWAHcrvL2C89PUs1wC2QddbaDEvLNaL5PFVFdYm5oBf7DXZWoFK8X4PLXAUA8L9zsV/0/*)";
+	const INTERNAL_DESCRIPTOR: &str = "wpkh([2de67592/84'/1'/0']tpubDCUJWjpCfXoCzDwWiHRwsALSWYSMXvHHzQ3q4CoiVgWAHcrvL2C89PUs1wC2QddbaDEvLNaL5PFVFdYm5oBf7DXZWoFK8X4PLXAUA8L9zsV/1/*)";
+
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let node = setup_node(&chain_source, random_config(false));
+
+	let account_id = AccountId("watchonly-test".to_string());
+	node.import_watchonly_account(
+		account_id.clone(),
+		EXTERNAL_DESCRIPTOR.to_string(),
+		INTERNAL_DESCRIPTOR.to_string(),
+	)
+	.unwrap();
+
+	// Fresh account: an address can be derived, but it holds nothing yet.
+	let addr = node.watchonly_new_address(&account_id).unwrap();
+	assert_eq!(node.watchonly_balance(&account_id).unwrap(), 0);
+	assert!(node.watchonly_list_utxos(&account_id).unwrap().is_empty());
+
+	// Fund the derived address on regtest and confirm it.
+	let amount_sat = 100_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr],
+		Amount::from_sat(amount_sat),
+	)
+	.await;
+
+	// Syncing against Esplora should now discover the funding output.
+	node.sync_watchonly_accounts().unwrap();
+
+	assert_eq!(node.watchonly_balance(&account_id).unwrap(), amount_sat);
+	assert_eq!(node.watchonly_list_utxos(&account_id).unwrap().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
