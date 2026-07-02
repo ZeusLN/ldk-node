@@ -118,8 +118,19 @@ async fn watchonly_account_syncs_balance() {
 	const INTERNAL_DESCRIPTOR: &str = "wpkh([2de67592/84'/1'/0']tpubDCUJWjpCfXoCzDwWiHRwsALSWYSMXvHHzQ3q4CoiVgWAHcrvL2C89PUs1wC2QddbaDEvLNaL5PFVFdYm5oBf7DXZWoFK8X4PLXAUA8L9zsV/1/*)";
 
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = TestChainSource::Esplora(&electrsd);
-	let node = setup_node(&chain_source, random_config(false));
+	let config = random_config(false);
+
+	// Share one store across both builds (as in `start_stop_reinit`): recreating
+	// the TestSyncStore would reset its in-memory consistency-check backend.
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let test_sync_store = TestSyncStore::new(config.node_config.storage_dir_path.clone().into());
+	let sync_config = EsploraSyncConfig { background_sync_config: None };
+
+	setup_builder!(builder, config.node_config);
+	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let node =
+		builder.build_with_store(config.node_entropy.into(), test_sync_store.clone()).unwrap();
+	node.start().unwrap();
 
 	let account_id = AccountId("watchonly-test".to_string());
 	node.import_watchonly_account(
@@ -139,7 +150,7 @@ async fn watchonly_account_syncs_balance() {
 	premine_and_distribute_funds(
 		&bitcoind.client,
 		&electrsd.client,
-		vec![addr],
+		vec![addr.clone()],
 		Amount::from_sat(amount_sat),
 	)
 	.await;
@@ -149,6 +160,27 @@ async fn watchonly_account_syncs_balance() {
 
 	assert_eq!(node.watchonly_balance(&account_id).unwrap(), amount_sat);
 	assert_eq!(node.watchonly_list_utxos(&account_id).unwrap().len(), 1);
+
+	// Restart: rebuild the node from the same storage. The account must be
+	// reloaded from persistence, with balance and sync state intact, before
+	// any re-import or re-sync happens.
+	node.stop().unwrap();
+	drop(node);
+
+	setup_builder!(builder, config.node_config);
+	builder.set_chain_source_esplora(esplora_url, Some(sync_config));
+	let node = builder.build_with_store(config.node_entropy.into(), test_sync_store).unwrap();
+	node.start().unwrap();
+
+	assert_eq!(node.watchonly_balance(&account_id).unwrap(), amount_sat);
+	assert_eq!(node.watchonly_list_utxos(&account_id).unwrap().len(), 1);
+	assert_eq!(node.watchonly_list_addresses(&account_id).unwrap(), vec![addr.clone()]);
+
+	// Address derivation must continue where it left off, not reuse the funded address.
+	let next_addr = node.watchonly_new_address(&account_id).unwrap();
+	assert_ne!(next_addr, addr);
+
+	node.stop().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
