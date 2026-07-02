@@ -666,6 +666,30 @@ where
 	})
 }
 
+/// Lists the account ids in the persisted watch-only account index.
+pub(crate) fn list_watchonly_account_ids<L: Deref>(
+	kv_store: Arc<DynStore>, logger: L,
+) -> Result<Vec<String>, Error>
+where
+	L::Target: LdkLogger,
+{
+	KVStoreSync::list(
+		&*kv_store,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+	)
+	.map_err(|e| {
+		log_error!(
+			logger,
+			"Listing keys in {}/{} failed due to: {}",
+			WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+			WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+			e
+		);
+		Error::PersistenceFailed
+	})
+}
+
 /// Removes `account_id` from the persisted watch-only account index.
 pub(crate) fn remove_watchonly_account_marker<L: Deref>(
 	account_id: &str, kv_store: Arc<DynStore>, logger: L,

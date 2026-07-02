@@ -54,7 +54,8 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{
-	read_external_pathfinding_scores_from_cache, read_node_metrics, write_node_metrics,
+	list_watchonly_account_ids, read_external_pathfinding_scores_from_cache, read_node_metrics,
+	remove_watchonly_account_marker, write_node_metrics,
 };
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
@@ -78,8 +79,9 @@ use crate::types::{
 	SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
+use crate::wallet::watchonly::WatchOnlyWallet;
 use crate::wallet::Wallet;
-use crate::{Node, NodeMetrics};
+use crate::{AccountId, Node, NodeMetrics};
 
 const LSPS_HARDENED_CHILD_INDEX: u32 = 577;
 const PERSISTER_MAX_PENDING_UPDATES: u64 = 100;
@@ -1862,6 +1864,40 @@ fn build_with_store_internal(
 		None
 	};
 
+	let mut watchonly_wallets = std::collections::HashMap::new();
+	let account_ids = list_watchonly_account_ids(Arc::clone(&kv_store), Arc::clone(&logger))
+		.map_err(|_| BuildError::WalletSetupFailed)?;
+	for account_id in account_ids {
+		match WatchOnlyWallet::load(
+			config.network,
+			Arc::clone(&kv_store),
+			account_id.clone(),
+			Arc::clone(&logger),
+		) {
+			Ok(Some(wallet)) => {
+				watchonly_wallets.insert(AccountId(account_id), Arc::new(wallet));
+			},
+			Ok(None) => {
+				// A dangling index entry left behind by an interrupted import; remove
+				// it so the account id can be imported again.
+				log_info!(
+					logger,
+					"Removing watch-only account index entry {} with no persisted state.",
+					account_id
+				);
+				let _ = remove_watchonly_account_marker(
+					&account_id,
+					Arc::clone(&kv_store),
+					Arc::clone(&logger),
+				);
+			},
+			Err(_) => {
+				log_error!(logger, "Failed to load watch-only account {}", account_id);
+				return Err(BuildError::WalletSetupFailed);
+			},
+		}
+	}
+
 	let (stop_sender, _) = tokio::sync::watch::channel(());
 	let (background_processor_stop_sender, _) = tokio::sync::watch::channel(());
 	let is_running = Arc::new(RwLock::new(false));
@@ -1874,7 +1910,7 @@ fn build_with_store_internal(
 		background_processor_stop_sender,
 		config,
 		wallet,
-		watchonly_wallets: Arc::new(Mutex::new(std::collections::HashMap::new())),
+		watchonly_wallets: Arc::new(Mutex::new(watchonly_wallets)),
 		chain_source,
 		tx_broadcaster,
 		fee_estimator,

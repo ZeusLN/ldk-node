@@ -45,6 +45,28 @@ impl WatchOnlyWallet {
 		Ok(Self { inner: Mutex::new(wallet), persister: Mutex::new(persister), logger })
 	}
 
+	/// Loads a previously imported wallet from its persisted state, returning
+	/// `None` if nothing is persisted under `secondary_namespace`.
+	pub(crate) fn load(
+		network: Network, kv_store: Arc<DynStore>, secondary_namespace: String, logger: Arc<Logger>,
+	) -> Result<Option<Self>, Error> {
+		let mut persister =
+			KVStoreWalletPersister::new(kv_store, secondary_namespace, Arc::clone(&logger));
+		let wallet_opt = BdkWallet::load()
+			.check_network(network)
+			.load_wallet(&mut persister)
+			.map_err(|e| {
+				log_error!(logger, "Failed to load watch-only wallet: {}", e);
+				Error::WalletOperationFailed
+			})?;
+
+		Ok(wallet_opt.map(|wallet| Self {
+			inner: Mutex::new(wallet),
+			persister: Mutex::new(persister),
+			logger,
+		}))
+	}
+
 	pub(crate) fn new_address(&self) -> Result<Address, Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
 		let mut locked_persister = self.persister.lock().unwrap();
@@ -207,5 +229,44 @@ mod tests {
 		let _wallet = import_test_wallet(Arc::clone(&store)).unwrap();
 
 		assert!(import_test_wallet(store).is_err());
+	}
+
+	#[test]
+	fn load_without_persisted_state_returns_none() {
+		let loaded = WatchOnlyWallet::load(
+			Network::Testnet,
+			test_store(),
+			TEST_NAMESPACE.to_string(),
+			Arc::new(Logger::new_log_facade()),
+		)
+		.unwrap();
+
+		assert!(loaded.is_none());
+	}
+
+	#[test]
+	fn persisted_account_survives_reload() {
+		let store = test_store();
+
+		let (first, second) = {
+			let wallet = import_test_wallet(Arc::clone(&store)).unwrap();
+			(wallet.new_address().unwrap(), wallet.new_address().unwrap())
+		};
+
+		let reloaded = WatchOnlyWallet::load(
+			Network::Testnet,
+			store,
+			TEST_NAMESPACE.to_string(),
+			Arc::new(Logger::new_log_facade()),
+		)
+		.unwrap()
+		.unwrap();
+
+		assert_eq!(reloaded.list_addresses(), vec![first.clone(), second.clone()]);
+
+		// Address derivation must continue where it left off, not restart at index 0.
+		let third = reloaded.new_address().unwrap();
+		assert_ne!(third, first);
+		assert_ne!(third, second);
 	}
 }
