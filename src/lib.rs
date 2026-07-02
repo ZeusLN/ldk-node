@@ -138,7 +138,10 @@ use fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use ffi::*;
 use gossip::GossipSource;
 use graph::NetworkGraph;
-use io::utils::write_node_metrics;
+use io::utils::{
+	is_valid_kvstore_str, remove_watchonly_account_marker, watchonly_account_marker_exists,
+	write_node_metrics, write_watchonly_account_marker,
+};
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::{Input, Wallet as LdkWallet};
 use lightning::impl_writeable_tlv_based;
@@ -960,27 +963,58 @@ impl Node {
 	/// descriptors, registering it under `account_id`.
 	///
 	/// The descriptors must be public (key-only); a watch-only account holds no
-	/// private keys and signs off-device via PSBT. The account's state is
-	/// persisted under its own KVStore namespace, so `account_id` must be
-	/// non-empty and unique: importing an `account_id` that was already
-	/// imported fails.
+	/// private keys and signs off-device via PSBT. The account is added to a
+	/// persisted index and its state is persisted under its own KVStore
+	/// namespace, so `account_id` must be non-empty, unique, and consist of
+	/// alphanumeric characters, `-`, or `_`: importing an `account_id` that
+	/// was already imported fails.
 	pub fn import_watchonly_account(
 		&self, account_id: AccountId, external_descriptor: String, internal_descriptor: String,
 	) -> Result<(), Error> {
-		if account_id.0.is_empty() {
-			log_error!(self.logger, "Watch-only account id must not be empty.");
+		if account_id.0.is_empty() || !is_valid_kvstore_str(&account_id.0) {
+			log_error!(self.logger, "Invalid watch-only account id: {}", account_id.0);
 			return Err(Error::WalletOperationFailed);
 		}
 
-		let wallet = WatchOnlyWallet::import(
+		// Hold the lock for the whole sequence to serialize concurrent imports.
+		let mut wallets = self.watchonly_wallets.lock().unwrap();
+
+		if watchonly_account_marker_exists(
+			&account_id.0,
+			Arc::clone(&self.kv_store),
+			Arc::clone(&self.logger),
+		)? {
+			log_error!(self.logger, "Watch-only account {} was already imported.", account_id.0);
+			return Err(Error::WalletOperationFailed);
+		}
+
+		// Index the account before creating the wallet: a dangling index entry is
+		// recoverable, while persisted wallet state missing from the index is not.
+		write_watchonly_account_marker(
+			&account_id.0,
+			Arc::clone(&self.kv_store),
+			Arc::clone(&self.logger),
+		)?;
+
+		let wallet = match WatchOnlyWallet::import(
 			external_descriptor,
 			internal_descriptor,
 			self.config.network,
 			Arc::clone(&self.kv_store),
 			account_id.0.clone(),
 			Arc::clone(&self.logger),
-		)?;
-		self.watchonly_wallets.lock().unwrap().insert(account_id, Arc::new(wallet));
+		) {
+			Ok(wallet) => wallet,
+			Err(e) => {
+				let _ = remove_watchonly_account_marker(
+					&account_id.0,
+					Arc::clone(&self.kv_store),
+					Arc::clone(&self.logger),
+				);
+				return Err(e);
+			},
+		};
+		wallets.insert(account_id, Arc::new(wallet));
 		Ok(())
 	}
 

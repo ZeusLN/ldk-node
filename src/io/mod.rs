@@ -69,6 +69,12 @@ pub(crate) const BDK_WALLET_TX_GRAPH_KEY: &str = "tx_graph";
 pub(crate) const BDK_WALLET_INDEXER_PRIMARY_NAMESPACE: &str = "bdk_wallet";
 pub(crate) const BDK_WALLET_INDEXER_KEY: &str = "indexer";
 
+/// The index of imported watch-only accounts will be persisted under this namespace, one key per
+/// account id. Each account's wallet state lives under the `bdk_wallet` primary namespace, with
+/// the account id as the secondary namespace.
+pub(crate) const WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE: &str = "watchonly_accounts";
+pub(crate) const WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
+
 /// The closed channel information will be persisted under this prefix.
 pub(crate) const CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE: &str = "closed_channels";
 pub(crate) const CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";

@@ -45,6 +45,8 @@ use crate::io::{
 	CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE, NODE_METRICS_KEY,
 	NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
+	WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+	WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::logger::{log_error, LdkLogger, Logger};
 use crate::peer_store::PeerStore;
@@ -608,10 +610,96 @@ pub(crate) fn read_bdk_wallet_change_set(
 	Ok(Some(change_set))
 }
 
+/// Returns whether `account_id` is present in the persisted watch-only account index.
+pub(crate) fn watchonly_account_marker_exists<L: Deref>(
+	account_id: &str, kv_store: Arc<DynStore>, logger: L,
+) -> Result<bool, Error>
+where
+	L::Target: LdkLogger,
+{
+	match KVStoreSync::read(
+		&*kv_store,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+		account_id,
+	) {
+		Ok(_) => Ok(true),
+		Err(e) if e.kind() == lightning::io::ErrorKind::NotFound => Ok(false),
+		Err(e) => {
+			log_error!(
+				logger,
+				"Reading data from key {}/{}/{} failed due to: {}",
+				WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+				WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+				account_id,
+				e
+			);
+			Err(Error::PersistenceFailed)
+		},
+	}
+}
+
+/// Adds `account_id` to the persisted watch-only account index.
+pub(crate) fn write_watchonly_account_marker<L: Deref>(
+	account_id: &str, kv_store: Arc<DynStore>, logger: L,
+) -> Result<(), Error>
+where
+	L::Target: LdkLogger,
+{
+	KVStoreSync::write(
+		&*kv_store,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+		account_id,
+		Vec::new(),
+	)
+	.map_err(|e| {
+		log_error!(
+			logger,
+			"Writing data to key {}/{}/{} failed due to: {}",
+			WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+			WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+			account_id,
+			e
+		);
+		Error::PersistenceFailed
+	})
+}
+
+/// Removes `account_id` from the persisted watch-only account index.
+pub(crate) fn remove_watchonly_account_marker<L: Deref>(
+	account_id: &str, kv_store: Arc<DynStore>, logger: L,
+) -> Result<(), Error>
+where
+	L::Target: LdkLogger,
+{
+	KVStoreSync::remove(
+		&*kv_store,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+		account_id,
+		false,
+	)
+	.map_err(|e| {
+		log_error!(
+			logger,
+			"Removing data at key {}/{}/{} failed due to: {}",
+			WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+			WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+			account_id,
+			e
+		);
+		Error::PersistenceFailed
+	})
+}
+
 #[cfg(test)]
 mod tests {
-	use super::read_or_generate_seed_file;
-	use super::test_utils::random_storage_path;
+	use lightning::util::test_utils::TestLogger;
+
+	use super::test_utils::{random_storage_path, InMemoryStore};
+	use super::*;
+	use crate::types::DynStoreWrapper;
 
 	#[test]
 	fn generated_seed_is_readable() {
@@ -620,5 +708,30 @@ mod tests {
 		let expected_seed_bytes = read_or_generate_seed_file(&rand_path.to_str().unwrap()).unwrap();
 		let read_seed_bytes = read_or_generate_seed_file(&rand_path.to_str().unwrap()).unwrap();
 		assert_eq!(expected_seed_bytes, read_seed_bytes);
+	}
+
+	#[test]
+	fn watchonly_account_marker_roundtrip() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+
+		assert!(!watchonly_account_marker_exists("acct", Arc::clone(&store), Arc::clone(&logger))
+			.unwrap());
+
+		write_watchonly_account_marker("acct", Arc::clone(&store), Arc::clone(&logger)).unwrap();
+		assert!(watchonly_account_marker_exists("acct", Arc::clone(&store), Arc::clone(&logger))
+			.unwrap());
+		assert_eq!(
+			KVStoreSync::list(
+				&*store,
+				WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+				WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE
+			)
+			.unwrap(),
+			vec!["acct".to_string()]
+		);
+
+		remove_watchonly_account_marker("acct", Arc::clone(&store), Arc::clone(&logger)).unwrap();
+		assert!(!watchonly_account_marker_exists("acct", store, logger).unwrap());
 	}
 }
