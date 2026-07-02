@@ -960,13 +960,26 @@ impl Node {
 	/// descriptors, registering it under `account_id`.
 	///
 	/// The descriptors must be public (key-only); a watch-only account holds no
-	/// private keys and signs off-device via PSBT. Re-importing an existing
-	/// `account_id` replaces the previously imported account.
+	/// private keys and signs off-device via PSBT. The account's state is
+	/// persisted under its own KVStore namespace, so `account_id` must be
+	/// non-empty and unique: importing an `account_id` that was already
+	/// imported fails.
 	pub fn import_watchonly_account(
 		&self, account_id: AccountId, external_descriptor: String, internal_descriptor: String,
 	) -> Result<(), Error> {
-		let wallet =
-			WatchOnlyWallet::import(external_descriptor, internal_descriptor, self.config.network)?;
+		if account_id.0.is_empty() {
+			log_error!(self.logger, "Watch-only account id must not be empty.");
+			return Err(Error::WalletOperationFailed);
+		}
+
+		let wallet = WatchOnlyWallet::import(
+			external_descriptor,
+			internal_descriptor,
+			self.config.network,
+			Arc::clone(&self.kv_store),
+			account_id.0.clone(),
+			Arc::clone(&self.logger),
+		)?;
 		self.watchonly_wallets.lock().unwrap().insert(account_id, Arc::new(wallet));
 		Ok(())
 	}
