@@ -20,12 +20,18 @@ use crate::types::DynStore;
 pub(crate) struct KVStoreWalletPersister {
 	latest_change_set: Option<ChangeSet>,
 	kv_store: Arc<DynStore>,
+	// The KVStore secondary namespace this wallet's change set is persisted under. The node's own
+	// on-chain wallet uses the empty namespace; each imported watch-only account uses its own
+	// namespace so multiple wallets never overwrite one another.
+	secondary_namespace: String,
 	logger: Arc<Logger>,
 }
 
 impl KVStoreWalletPersister {
-	pub(crate) fn new(kv_store: Arc<DynStore>, logger: Arc<Logger>) -> Self {
-		Self { latest_change_set: None, kv_store, logger }
+	pub(crate) fn new(
+		kv_store: Arc<DynStore>, secondary_namespace: String, logger: Arc<Logger>,
+	) -> Self {
+		Self { latest_change_set: None, kv_store, secondary_namespace, logger }
 	}
 }
 
@@ -40,6 +46,7 @@ impl WalletPersister for KVStoreWalletPersister {
 
 		let change_set_opt = read_bdk_wallet_change_set(
 			Arc::clone(&persister.kv_store),
+			&persister.secondary_namespace,
 			Arc::clone(&persister.logger),
 		)?;
 
@@ -90,6 +97,7 @@ impl WalletPersister for KVStoreWalletPersister {
 				write_bdk_wallet_descriptor(
 					&descriptor,
 					Arc::clone(&persister.kv_store),
+					&persister.secondary_namespace,
 					Arc::clone(&persister.logger),
 				)?;
 			}
@@ -113,6 +121,7 @@ impl WalletPersister for KVStoreWalletPersister {
 				write_bdk_wallet_change_descriptor(
 					&change_descriptor,
 					Arc::clone(&persister.kv_store),
+					&persister.secondary_namespace,
 					Arc::clone(&persister.logger),
 				)?;
 			}
@@ -134,6 +143,7 @@ impl WalletPersister for KVStoreWalletPersister {
 				write_bdk_wallet_network(
 					&network,
 					Arc::clone(&persister.kv_store),
+					&persister.secondary_namespace,
 					Arc::clone(&persister.logger),
 				)?;
 			}
@@ -158,6 +168,7 @@ impl WalletPersister for KVStoreWalletPersister {
 			write_bdk_wallet_indexer(
 				&latest_change_set.indexer,
 				Arc::clone(&persister.kv_store),
+				&persister.secondary_namespace,
 				Arc::clone(&persister.logger),
 			)?;
 		}
@@ -167,6 +178,7 @@ impl WalletPersister for KVStoreWalletPersister {
 			write_bdk_wallet_tx_graph(
 				&latest_change_set.tx_graph,
 				Arc::clone(&persister.kv_store),
+				&persister.secondary_namespace,
 				Arc::clone(&persister.logger),
 			)?;
 		}
@@ -176,6 +188,7 @@ impl WalletPersister for KVStoreWalletPersister {
 			write_bdk_wallet_local_chain(
 				&latest_change_set.local_chain,
 				Arc::clone(&persister.kv_store),
+				&persister.secondary_namespace,
 				Arc::clone(&persister.logger),
 			)?;
 		}

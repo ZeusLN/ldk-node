@@ -37,42 +37,36 @@ pub(crate) const NODE_METRICS_KEY: &str = "node_metrics";
 ///
 /// [`ChangeSet::descriptor`]: bdk_wallet::ChangeSet::descriptor
 pub(crate) const BDK_WALLET_DESCRIPTOR_PRIMARY_NAMESPACE: &str = "bdk_wallet";
-pub(crate) const BDK_WALLET_DESCRIPTOR_SECONDARY_NAMESPACE: &str = "";
 pub(crate) const BDK_WALLET_DESCRIPTOR_KEY: &str = "descriptor";
 
 /// The BDK wallet's [`ChangeSet::change_descriptor`] will be persisted under this key.
 ///
 /// [`ChangeSet::change_descriptor`]: bdk_wallet::ChangeSet::change_descriptor
 pub(crate) const BDK_WALLET_CHANGE_DESCRIPTOR_PRIMARY_NAMESPACE: &str = "bdk_wallet";
-pub(crate) const BDK_WALLET_CHANGE_DESCRIPTOR_SECONDARY_NAMESPACE: &str = "";
 pub(crate) const BDK_WALLET_CHANGE_DESCRIPTOR_KEY: &str = "change_descriptor";
 
 /// The BDK wallet's [`ChangeSet::network`] will be persisted under this key.
 ///
 /// [`ChangeSet::network`]: bdk_wallet::ChangeSet::network
 pub(crate) const BDK_WALLET_NETWORK_PRIMARY_NAMESPACE: &str = "bdk_wallet";
-pub(crate) const BDK_WALLET_NETWORK_SECONDARY_NAMESPACE: &str = "";
 pub(crate) const BDK_WALLET_NETWORK_KEY: &str = "network";
 
 /// The BDK wallet's [`ChangeSet::local_chain`] will be persisted under this key.
 ///
 /// [`ChangeSet::local_chain`]: bdk_wallet::ChangeSet::local_chain
 pub(crate) const BDK_WALLET_LOCAL_CHAIN_PRIMARY_NAMESPACE: &str = "bdk_wallet";
-pub(crate) const BDK_WALLET_LOCAL_CHAIN_SECONDARY_NAMESPACE: &str = "";
 pub(crate) const BDK_WALLET_LOCAL_CHAIN_KEY: &str = "local_chain";
 
 /// The BDK wallet's [`ChangeSet::tx_graph`] will be persisted under this key.
 ///
 /// [`ChangeSet::tx_graph`]: bdk_wallet::ChangeSet::tx_graph
 pub(crate) const BDK_WALLET_TX_GRAPH_PRIMARY_NAMESPACE: &str = "bdk_wallet";
-pub(crate) const BDK_WALLET_TX_GRAPH_SECONDARY_NAMESPACE: &str = "";
 pub(crate) const BDK_WALLET_TX_GRAPH_KEY: &str = "tx_graph";
 
 /// The BDK wallet's [`ChangeSet::indexer`] will be persisted under this key.
 ///
 /// [`ChangeSet::indexer`]: bdk_wallet::ChangeSet::indexer
 pub(crate) const BDK_WALLET_INDEXER_PRIMARY_NAMESPACE: &str = "bdk_wallet";
-pub(crate) const BDK_WALLET_INDEXER_SECONDARY_NAMESPACE: &str = "";
 pub(crate) const BDK_WALLET_INDEXER_KEY: &str = "indexer";
 
 /// The closed channel information will be persisted under this prefix.
