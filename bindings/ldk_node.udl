@@ -171,6 +171,8 @@ interface Node {
 	void sync_watchonly_accounts();
 	sequence<AccountId> list_watchonly_accounts();
 	[Throws=NodeError]
+	WatchonlyAccountPreview preview_watchonly_account(string external_descriptor, string internal_descriptor, u8 count);
+	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
 	[Throws=NodeError]
 	void disconnect(PublicKey node_id);
@@ -312,6 +314,11 @@ dictionary WalletUtxo {
 	u64 value_sats;
 	string address;
 	boolean is_spent;
+};
+
+dictionary WatchonlyAccountPreview {
+	sequence<Address> external_addresses;
+	sequence<Address> internal_addresses;
 };
 
 interface OnchainPayment {

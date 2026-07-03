@@ -16,6 +16,21 @@ use crate::types::DynStore;
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::Error;
 
+/// The maximum number of addresses returned per keychain by a watch-only
+/// account preview.
+const PREVIEW_MAX_ADDRESSES: u8 = 20;
+
+/// The first addresses of each keychain derived from a pair of public
+/// descriptors, allowing an account to be verified against the originating
+/// wallet before it is imported.
+#[derive(Debug, Clone)]
+pub struct WatchonlyAccountPreview {
+	/// The first external (receive) addresses.
+	pub external_addresses: Vec<Address>,
+	/// The first internal (change) addresses.
+	pub internal_addresses: Vec<Address>,
+}
+
 /// A watch-only on-chain wallet built from public descriptors; it holds no
 /// private keys and so can derive addresses and observe funds, but cannot sign.
 ///
@@ -43,6 +58,29 @@ impl WatchOnlyWallet {
 			})?;
 
 		Ok(Self { inner: Mutex::new(wallet), persister: Mutex::new(persister), logger })
+	}
+
+	/// Derives the first `count` addresses of each keychain from the given
+	/// descriptors without persisting or revealing anything.
+	pub(crate) fn preview(
+		external_descriptor: String, internal_descriptor: String, network: Network, count: u8,
+		logger: Arc<Logger>,
+	) -> Result<WatchonlyAccountPreview, Error> {
+		let wallet = BdkWallet::create(external_descriptor, internal_descriptor)
+			.network(network)
+			.create_wallet_no_persist()
+			.map_err(|e| {
+				log_error!(logger, "Failed to preview watch-only account: {}", e);
+				Error::WalletOperationFailed
+			})?;
+
+		let count = count.clamp(1, PREVIEW_MAX_ADDRESSES) as u32;
+		let external_addresses =
+			(0..count).map(|i| wallet.peek_address(KeychainKind::External, i).address).collect();
+		let internal_addresses =
+			(0..count).map(|i| wallet.peek_address(KeychainKind::Internal, i).address).collect();
+
+		Ok(WatchonlyAccountPreview { external_addresses, internal_addresses })
 	}
 
 	/// Loads a previously imported wallet from its persisted state, returning
@@ -229,6 +267,45 @@ mod tests {
 		let _wallet = import_test_wallet(Arc::clone(&store)).unwrap();
 
 		assert!(import_test_wallet(store).is_err());
+	}
+
+	fn preview_test_account(count: u8) -> WatchonlyAccountPreview {
+		WatchOnlyWallet::preview(
+			EXTERNAL_DESCRIPTOR.to_string(),
+			INTERNAL_DESCRIPTOR.to_string(),
+			Network::Testnet,
+			count,
+			Arc::new(Logger::new_log_facade()),
+		)
+		.unwrap()
+	}
+
+	#[test]
+	fn preview_derives_known_addresses() {
+		let preview = preview_test_account(5);
+
+		assert_eq!(preview.external_addresses.len(), 5);
+		assert_eq!(preview.internal_addresses.len(), 5);
+		assert_eq!(
+			preview.external_addresses[0].to_string(),
+			"tb1q7whne2rauhqkg7pe8dpra6rs5cxgq0429pxn88"
+		);
+		assert_ne!(preview.external_addresses[0], preview.internal_addresses[0]);
+	}
+
+	#[test]
+	fn preview_clamps_address_count() {
+		assert_eq!(preview_test_account(0).external_addresses.len(), 1);
+		assert_eq!(preview_test_account(255).external_addresses.len(), 20);
+	}
+
+	#[test]
+	fn preview_matches_imported_account_addresses() {
+		let preview = preview_test_account(2);
+		let wallet = import_test_wallet(test_store()).unwrap();
+
+		assert_eq!(wallet.new_address().unwrap(), preview.external_addresses[0]);
+		assert_eq!(wallet.new_address().unwrap(), preview.external_addresses[1]);
 	}
 
 	#[test]

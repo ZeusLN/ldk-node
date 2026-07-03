@@ -132,6 +132,8 @@ async fn watchonly_account_syncs_balance() {
 		builder.build_with_store(config.node_entropy.into(), test_sync_store.clone()).unwrap();
 	node.start().unwrap();
 
+	assert!(node.list_watchonly_accounts().is_empty());
+
 	let account_id = AccountId("watchonly-test".to_string());
 	node.import_watchonly_account(
 		account_id.clone(),
@@ -140,10 +142,24 @@ async fn watchonly_account_syncs_balance() {
 	)
 	.unwrap();
 
+	assert_eq!(node.list_watchonly_accounts(), vec![account_id.clone()]);
+
 	// Fresh account: an address can be derived, but it holds nothing yet.
 	let addr = node.watchonly_new_address(&account_id).unwrap();
 	assert_eq!(node.watchonly_balance(&account_id).unwrap(), 0);
 	assert!(node.watchonly_list_utxos(&account_id).unwrap().is_empty());
+
+	// Previewing the same descriptors derives the same address the account
+	// hands out, without importing or persisting anything.
+	let preview = node
+		.preview_watchonly_account(
+			EXTERNAL_DESCRIPTOR.to_string(),
+			INTERNAL_DESCRIPTOR.to_string(),
+			3,
+		)
+		.unwrap();
+	assert_eq!(preview.external_addresses.len(), 3);
+	assert_eq!(preview.external_addresses[0], addr);
 
 	// Fund the derived address on regtest and confirm it.
 	let amount_sat = 100_000;
@@ -172,6 +188,7 @@ async fn watchonly_account_syncs_balance() {
 	let node = builder.build_with_store(config.node_entropy.into(), test_sync_store).unwrap();
 	node.start().unwrap();
 
+	assert_eq!(node.list_watchonly_accounts(), vec![account_id.clone()]);
 	assert_eq!(node.watchonly_balance(&account_id).unwrap(), amount_sat);
 	assert_eq!(node.watchonly_list_utxos(&account_id).unwrap().len(), 1);
 	assert_eq!(node.watchonly_list_addresses(&account_id).unwrap(), vec![addr.clone()]);

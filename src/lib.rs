@@ -172,6 +172,7 @@ use types::{
 pub use types::{
 	AccountId, ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId,
 };
+pub use wallet::watchonly::WatchonlyAccountPreview;
 pub use {
 	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
 	vss_client,
@@ -1067,6 +1068,22 @@ impl Node {
 		let mut account_ids: Vec<AccountId> = wallets.keys().cloned().collect();
 		account_ids.sort_by(|a, b| a.0.cmp(&b.0));
 		account_ids
+	}
+
+	/// Derives the first `count` external (receive) and internal (change)
+	/// addresses from the given public descriptors without importing or
+	/// persisting anything, allowing an account to be verified against its
+	/// originating wallet before import.
+	pub fn preview_watchonly_account(
+		&self, external_descriptor: String, internal_descriptor: String, count: u8,
+	) -> Result<WatchonlyAccountPreview, Error> {
+		WatchOnlyWallet::preview(
+			external_descriptor,
+			internal_descriptor,
+			self.config.network,
+			count,
+			Arc::clone(&self.logger),
+		)
 	}
 
 	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
