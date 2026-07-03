@@ -1058,6 +1058,17 @@ impl Node {
 		Ok(wallet.list_addresses())
 	}
 
+	/// Lists the ids of all currently imported watch-only accounts.
+	///
+	/// This reflects the accounts restored from persistence at startup plus any
+	/// imported since, and is the source of truth for which accounts exist.
+	pub fn list_watchonly_accounts(&self) -> Vec<AccountId> {
+		let wallets = self.watchonly_wallets.lock().unwrap();
+		let mut account_ids: Vec<AccountId> = wallets.keys().cloned().collect();
+		account_ids.sort_by(|a, b| a.0.cmp(&b.0));
+		account_ids
+	}
+
 	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
 	/// and [BOLT 12] payment options.
 	///
