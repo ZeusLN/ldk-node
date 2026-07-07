@@ -21,6 +21,7 @@ use crate::config::{
 	Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP,
 	BDK_WALLET_SYNC_TIMEOUT_SECS, DEFAULT_ESPLORA_CLIENT_TIMEOUT_SECS,
 	FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
+	WATCHONLY_SYNC_TIMEOUT_SECS,
 };
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
@@ -106,7 +107,7 @@ impl EsploraChainSource {
 		let now = Instant::now();
 		let full_scan_request = wallet.get_full_scan_request();
 		let update_res = tokio::time::timeout(
-			Duration::from_secs(BDK_WALLET_SYNC_TIMEOUT_SECS),
+			Duration::from_secs(WATCHONLY_SYNC_TIMEOUT_SECS),
 			self.esplora_client.full_scan(
 				full_scan_request,
 				BDK_CLIENT_STOP_GAP,

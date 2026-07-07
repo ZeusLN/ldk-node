@@ -75,6 +75,9 @@ pub(crate) const WALLET_SYNC_INTERVAL_MINIMUM_SECS: u64 = 10;
 // The timeout after which we abort a wallet syncing operation.
 pub(crate) const BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 20;
 
+// The timeout after which we abort a watch-only account syncing operation.
+pub(crate) const WATCHONLY_SYNC_TIMEOUT_SECS: u64 = 180;
+
 // The timeout after which we abort a wallet syncing operation.
 pub(crate) const LDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 10;
 
