@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use bdk_chain::spk_client::FullScanRequest;
 use bdk_wallet::{KeychainKind, PersistedWallet, Update, Wallet as BdkWallet};
-use bitcoin::{Address, Network};
+use bitcoin::psbt::Psbt;
+use bitcoin::{Address, Amount, FeeRate, Network, OutPoint};
 
 use crate::logger::{log_error, LdkLogger, Logger};
 use crate::types::DynStore;
@@ -19,6 +20,16 @@ use crate::Error;
 /// The maximum number of addresses returned per keychain by a watch-only
 /// account preview.
 const PREVIEW_MAX_ADDRESSES: u8 = 20;
+
+/// A single output of a watch-only spend: an address to pay and the amount, in
+/// satoshis, to send to it.
+#[derive(Debug, Clone)]
+pub struct PsbtRecipient {
+	/// The address to pay.
+	pub address: Address,
+	/// The amount to send, in satoshis.
+	pub amount_sats: u64,
+}
 
 /// The first addresses of each keychain derived from a pair of public
 /// descriptors, allowing an account to be verified against the originating
@@ -90,10 +101,8 @@ impl WatchOnlyWallet {
 	) -> Result<Option<Self>, Error> {
 		let mut persister =
 			KVStoreWalletPersister::new(kv_store, secondary_namespace, Arc::clone(&logger));
-		let wallet_opt = BdkWallet::load()
-			.check_network(network)
-			.load_wallet(&mut persister)
-			.map_err(|e| {
+		let wallet_opt =
+			BdkWallet::load().check_network(network).load_wallet(&mut persister).map_err(|e| {
 				log_error!(logger, "Failed to load watch-only wallet: {}", e);
 				Error::WalletOperationFailed
 			})?;
@@ -115,6 +124,78 @@ impl WatchOnlyWallet {
 			Error::PersistenceFailed
 		})?;
 		Ok(address_info.address)
+	}
+
+	/// Builds an unsigned PSBT spending from this account to the given
+	/// recipients, ready to be signed on an external (hardware) device.
+	///
+	/// The PSBT carries the metadata a signer needs to identify and verify its
+	/// own inputs and change: the account's global xpubs, and — populated by
+	/// BDK from the account descriptors — each input's previous output (both the
+	/// witness UTXO and the full previous transaction) and the per-input and
+	/// per-output BIP 32 key derivations. It is returned unsigned, as a
+	/// watch-only wallet holds no private keys.
+	///
+	/// If `utxos` is empty the wallet selects inputs itself; otherwise exactly
+	/// the given outpoints are spent. All recipient addresses must belong to the
+	/// account's network.
+	pub(crate) fn create_psbt(
+		&self, recipients: Vec<PsbtRecipient>, utxos: Vec<OutPoint>, fee_rate: FeeRate,
+	) -> Result<Psbt, Error> {
+		let mut locked_wallet = self.inner.lock().unwrap();
+		let network = locked_wallet.network();
+
+		for recipient in &recipients {
+			if !recipient.address.as_unchecked().is_valid_for_network(network) {
+				log_error!(
+					self.logger,
+					"Watch-only recipient address {} is not valid for network {}",
+					recipient.address,
+					network
+				);
+				return Err(Error::InvalidAddress);
+			}
+		}
+
+		let mut tx_builder = locked_wallet.build_tx();
+		for recipient in &recipients {
+			tx_builder.add_recipient(
+				recipient.address.script_pubkey(),
+				Amount::from_sat(recipient.amount_sats),
+			);
+		}
+		tx_builder.fee_rate(fee_rate);
+
+		// Add the account's extended public keys to the PSBT so an external
+		// signer can recognize the account as its own.
+		tx_builder.add_global_xpubs();
+
+		// An empty selection lets BDK choose the inputs; a non-empty one pins the
+		// spend to exactly those outpoints.
+		if !utxos.is_empty() {
+			for outpoint in &utxos {
+				tx_builder.add_utxo(*outpoint).map_err(|e| {
+					log_error!(self.logger, "Failed to add watch-only UTXO {}: {}", outpoint, e);
+					Error::OnchainTxCreationFailed
+				})?;
+			}
+			tx_builder.manually_selected_only();
+		}
+
+		let psbt = tx_builder.finish().map_err(|e| {
+			log_error!(self.logger, "Failed to build watch-only PSBT: {}", e);
+			Error::from(e)
+		})?;
+
+		// `finish` reveals the next change address; persist so its index is not
+		// reused on the next spend.
+		let mut locked_persister = self.persister.lock().unwrap();
+		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+			log_error!(self.logger, "Failed to persist watch-only wallet: {}", e);
+			Error::PersistenceFailed
+		})?;
+
+		Ok(psbt)
 	}
 
 	pub(crate) fn balance(&self) -> u64 {
@@ -172,10 +253,23 @@ impl WatchOnlyWallet {
 		})?;
 		Ok(())
 	}
+
+	/// Runs `f` against the inner BDK wallet, used by tests to seed chain and
+	/// UTXO state that a live wallet would obtain from an Esplora scan.
+	#[cfg(test)]
+	fn with_inner_mut<R>(&self, f: impl FnOnce(&mut BdkWallet) -> R) -> R {
+		f(&mut self.inner.lock().unwrap())
+	}
 }
 
 #[cfg(test)]
 mod tests {
+	use std::str::FromStr;
+
+	use bdk_chain::BlockId;
+	use bdk_wallet::test_utils::{insert_checkpoint, receive_output_in_latest_block};
+	use bitcoin::hashes::Hash;
+	use bitcoin::BlockHash;
 	use lightning::util::persist::KVStoreSync;
 
 	use super::*;
@@ -188,9 +282,32 @@ mod tests {
 	const EXTERNAL_DESCRIPTOR: &str = "wpkh([2de67592/84'/1'/0']tpubDCUJWjpCfXoCzDwWiHRwsALSWYSMXvHHzQ3q4CoiVgWAHcrvL2C89PUs1wC2QddbaDEvLNaL5PFVFdYm5oBf7DXZWoFK8X4PLXAUA8L9zsV/0/*)";
 	const INTERNAL_DESCRIPTOR: &str = "wpkh([2de67592/84'/1'/0']tpubDCUJWjpCfXoCzDwWiHRwsALSWYSMXvHHzQ3q4CoiVgWAHcrvL2C89PUs1wC2QddbaDEvLNaL5PFVFdYm5oBf7DXZWoFK8X4PLXAUA8L9zsV/1/*)";
 	const TEST_NAMESPACE: &str = "testaccount";
+	// The account's master fingerprint, as it appears in the descriptors above.
+	const MASTER_FINGERPRINT: &str = "2de67592";
+	// A testnet address outside the account, used as a spend recipient.
+	const RECIPIENT_ADDRESS: &str = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx";
 
 	fn test_store() -> Arc<DynStore> {
 		Arc::new(DynStoreWrapper(InMemoryStore::new()))
+	}
+
+	fn testnet_fee_rate() -> FeeRate {
+		FeeRate::from_sat_per_vb(2).unwrap()
+	}
+
+	fn recipient(amount_sats: u64) -> PsbtRecipient {
+		let address = Address::from_str(RECIPIENT_ADDRESS).unwrap().assume_checked();
+		PsbtRecipient { address, amount_sats }
+	}
+
+	// Funds the account with a single confirmed UTXO of `amount_sats`, mimicking
+	// what an Esplora scan would apply. Returns the funding outpoint.
+	fn fund_account(wallet: &WatchOnlyWallet, amount_sats: u64) -> OutPoint {
+		wallet.with_inner_mut(|w| {
+			// `receive_output_in_latest_block` requires a non-genesis tip.
+			insert_checkpoint(w, BlockId { height: 1_000, hash: BlockHash::all_zeros() });
+			receive_output_in_latest_block(w, Amount::from_sat(amount_sats))
+		})
 	}
 
 	fn import_test_wallet(store: Arc<DynStore>) -> Result<WatchOnlyWallet, Error> {
@@ -345,5 +462,158 @@ mod tests {
 		let third = reloaded.new_address().unwrap();
 		assert_ne!(third, first);
 		assert_ne!(third, second);
+	}
+
+	#[test]
+	fn create_psbt_is_unsigned_and_pays_recipient() {
+		let wallet = import_test_wallet(test_store()).unwrap();
+		fund_account(&wallet, 100_000);
+
+		let psbt = wallet.create_psbt(vec![recipient(50_000)], vec![], testnet_fee_rate()).unwrap();
+
+		// The recipient output must be present at its requested value.
+		let recipient_spk = recipient(0).address.script_pubkey();
+		let paid = psbt
+			.unsigned_tx
+			.output
+			.iter()
+			.find(|o| o.script_pubkey == recipient_spk)
+			.expect("recipient output missing");
+		assert_eq!(paid.value, Amount::from_sat(50_000));
+
+		// A watch-only wallet cannot sign: no input may carry a signature or a
+		// finalized witness/script.
+		for input in &psbt.inputs {
+			assert!(input.partial_sigs.is_empty());
+			assert!(input.final_script_sig.is_none());
+			assert!(input.final_script_witness.is_none());
+		}
+	}
+
+	#[test]
+	fn create_psbt_carries_hardware_signing_metadata() {
+		let wallet = import_test_wallet(test_store()).unwrap();
+		fund_account(&wallet, 100_000);
+
+		let psbt = wallet.create_psbt(vec![recipient(50_000)], vec![], testnet_fee_rate()).unwrap();
+
+		// The account's global xpub lets an external signer recognize the account.
+		assert!(!psbt.xpub.is_empty());
+		let (fingerprint, _path) = psbt.xpub.values().next().unwrap();
+		assert_eq!(fingerprint.to_string(), MASTER_FINGERPRINT);
+
+		// Each input must let the signer verify amounts and identify its key:
+		// the witness UTXO, the full previous transaction, and the key derivation.
+		for input in &psbt.inputs {
+			assert!(input.witness_utxo.is_some());
+			assert!(input.non_witness_utxo.is_some());
+			assert!(!input.bip32_derivation.is_empty());
+		}
+
+		// The change output must be recognizable as self-owned, so it carries a
+		// key derivation too; the recipient output does not.
+		let recipient_spk = recipient(0).address.script_pubkey();
+		let change_output = psbt
+			.unsigned_tx
+			.output
+			.iter()
+			.zip(&psbt.outputs)
+			.find(|(txout, _)| txout.script_pubkey != recipient_spk)
+			.map(|(_, out)| out)
+			.expect("change output missing");
+		assert!(!change_output.bip32_derivation.is_empty());
+	}
+
+	#[test]
+	fn create_psbt_change_pays_internal_keychain() {
+		let wallet = import_test_wallet(test_store()).unwrap();
+		fund_account(&wallet, 100_000);
+
+		let psbt = wallet.create_psbt(vec![recipient(50_000)], vec![], testnet_fee_rate()).unwrap();
+
+		// The first internal (change) address of the account.
+		let change_spk = wallet
+			.with_inner_mut(|w| w.peek_address(KeychainKind::Internal, 0).address.script_pubkey());
+		assert!(psbt.unsigned_tx.output.iter().any(|o| o.script_pubkey == change_spk));
+	}
+
+	#[test]
+	fn create_psbt_with_manual_selection_spends_only_given_utxos() {
+		let wallet = import_test_wallet(test_store()).unwrap();
+		let first = fund_account(&wallet, 60_000);
+		let _second = fund_account(&wallet, 60_000);
+
+		let psbt =
+			wallet.create_psbt(vec![recipient(20_000)], vec![first], testnet_fee_rate()).unwrap();
+
+		let spent: Vec<OutPoint> =
+			psbt.unsigned_tx.input.iter().map(|i| i.previous_output).collect();
+		assert_eq!(spent, vec![first]);
+	}
+
+	#[test]
+	fn create_psbt_supports_multiple_recipients() {
+		let wallet = import_test_wallet(test_store()).unwrap();
+		fund_account(&wallet, 200_000);
+
+		let second_recipient = PsbtRecipient {
+			address: Address::from_str("tb1q7whne2rauhqkg7pe8dpra6rs5cxgq0429pxn88")
+				.unwrap()
+				.assume_checked(),
+			amount_sats: 30_000,
+		};
+		let psbt = wallet
+			.create_psbt(
+				vec![recipient(50_000), second_recipient.clone()],
+				vec![],
+				testnet_fee_rate(),
+			)
+			.unwrap();
+
+		let outputs = &psbt.unsigned_tx.output;
+		assert!(outputs.iter().any(|o| o.script_pubkey == recipient(0).address.script_pubkey()
+			&& o.value == Amount::from_sat(50_000)));
+		assert!(outputs
+			.iter()
+			.any(|o| o.script_pubkey == second_recipient.address.script_pubkey()
+				&& o.value == Amount::from_sat(30_000)));
+	}
+
+	#[test]
+	fn create_psbt_rejects_unknown_utxo() {
+		let wallet = import_test_wallet(test_store()).unwrap();
+		fund_account(&wallet, 100_000);
+
+		let unknown = OutPoint { txid: bitcoin::Txid::all_zeros(), vout: 0 };
+		let result = wallet.create_psbt(vec![recipient(50_000)], vec![unknown], testnet_fee_rate());
+
+		assert!(matches!(result, Err(Error::OnchainTxCreationFailed)));
+	}
+
+	#[test]
+	fn create_psbt_with_insufficient_funds_errors() {
+		let wallet = import_test_wallet(test_store()).unwrap();
+		fund_account(&wallet, 10_000);
+
+		let result = wallet.create_psbt(vec![recipient(1_000_000)], vec![], testnet_fee_rate());
+
+		assert!(matches!(result, Err(Error::InsufficientFunds)));
+	}
+
+	#[test]
+	fn create_psbt_rejects_wrong_network_recipient() {
+		let wallet = import_test_wallet(test_store()).unwrap();
+		fund_account(&wallet, 100_000);
+
+		// A mainnet address does not belong to this testnet account.
+		let mainnet_recipient = PsbtRecipient {
+			address: Address::from_str("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
+				.unwrap()
+				.assume_checked(),
+			amount_sats: 50_000,
+		};
+		let result = wallet.create_psbt(vec![mainnet_recipient], vec![], testnet_fee_rate());
+
+		assert!(matches!(result, Err(Error::InvalidAddress)));
 	}
 }
