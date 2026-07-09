@@ -116,6 +116,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 pub use closed_channel::ClosedChannelDetails;
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Amount, OutPoint, WPubkeyHash};
 #[cfg(feature = "uniffi")]
@@ -172,7 +174,7 @@ use types::{
 pub use types::{
 	AccountId, ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId,
 };
-pub use wallet::watchonly::WatchonlyAccountPreview;
+pub use wallet::watchonly::{PsbtRecipient, WatchonlyAccountPreview};
 pub use {
 	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
 	vss_client,
@@ -1084,6 +1086,51 @@ impl Node {
 			count,
 			Arc::clone(&self.logger),
 		)
+	}
+
+	/// Builds an unsigned PSBT spending from the watch-only account registered
+	/// under `account_id`, returned as a base64 string ready to be signed on an
+	/// external (hardware) device.
+	///
+	/// If `utxos` is empty the account selects its own inputs; otherwise exactly
+	/// the given outpoints are spent. All recipient addresses must belong to the
+	/// node's network.
+	//
+	// UniFFI exposes `bitcoin::FeeRate` as an interface, so it arrives wrapped in
+	// an `Arc` under that feature and as the plain type otherwise.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn watchonly_create_psbt(
+		&self, account_id: &AccountId, recipients: Vec<PsbtRecipient>, utxos: Vec<OutPoint>,
+		fee_rate: bitcoin::FeeRate,
+	) -> Result<String, Error> {
+		self.watchonly_create_psbt_inner(account_id, recipients, utxos, fee_rate)
+	}
+
+	/// Builds an unsigned PSBT spending from the watch-only account registered
+	/// under `account_id`, returned as a base64 string ready to be signed on an
+	/// external (hardware) device.
+	///
+	/// If `utxos` is empty the account selects its own inputs; otherwise exactly
+	/// the given outpoints are spent. All recipient addresses must belong to the
+	/// node's network.
+	#[cfg(feature = "uniffi")]
+	pub fn watchonly_create_psbt(
+		&self, account_id: &AccountId, recipients: Vec<PsbtRecipient>, utxos: Vec<OutPoint>,
+		fee_rate: Arc<bitcoin::FeeRate>,
+	) -> Result<String, Error> {
+		self.watchonly_create_psbt_inner(account_id, recipients, utxos, *fee_rate)
+	}
+
+	fn watchonly_create_psbt_inner(
+		&self, account_id: &AccountId, recipients: Vec<PsbtRecipient>, utxos: Vec<OutPoint>,
+		fee_rate: bitcoin::FeeRate,
+	) -> Result<String, Error> {
+		let wallet = {
+			let wallets = self.watchonly_wallets.lock().unwrap();
+			wallets.get(account_id).ok_or(Error::WalletOperationFailed)?.clone()
+		};
+		let psbt = wallet.create_psbt(recipients, utxos, fee_rate)?;
+		Ok(BASE64_STANDARD.encode(psbt.serialize()))
 	}
 
 	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
