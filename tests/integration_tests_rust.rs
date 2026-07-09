@@ -201,6 +201,130 @@ async fn watchonly_account_syncs_balance() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[allow(deprecated)]
+async fn watchonly_account_spends_via_signed_psbt() {
+	use bdk_wallet::descriptor::IntoWalletDescriptor;
+	use bdk_wallet::template::Bip84;
+	use bdk_wallet::{KeychainKind, SignOptions, Wallet as BdkWallet};
+	use bitcoin::bip32::Xpriv;
+	use bitcoin::key::Secp256k1;
+	use bitcoin::psbt::Psbt;
+	use bitcoin::{FeeRate, Network};
+	use electrsd::electrum_client::ElectrumApi;
+	use rand::{rng, Rng};
+
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let config = random_config(false);
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let sync_config = EsploraSyncConfig { background_sync_config: None };
+
+	setup_builder!(builder, config.node_config);
+	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let node = builder.build(config.node_entropy.into()).unwrap();
+	node.start().unwrap();
+
+	// Derive a BIP84 account from a fresh master key, producing matching public
+	// descriptors (imported as the watch-only account) and private descriptors
+	// (used below to sign, standing in for a hardware device).
+	let secp = Secp256k1::new();
+	let seed: [u8; 32] = rng().random();
+	let xprv = Xpriv::new_master(Network::Regtest, &seed).unwrap();
+
+	let (external_desc, external_keymap) =
+		Bip84(xprv, KeychainKind::External).into_wallet_descriptor(&secp, Network::Regtest).unwrap();
+	let (internal_desc, internal_keymap) =
+		Bip84(xprv, KeychainKind::Internal).into_wallet_descriptor(&secp, Network::Regtest).unwrap();
+	let external_public = external_desc.to_string();
+	let internal_public = internal_desc.to_string();
+	let external_private = external_desc.to_string_with_secret(&external_keymap);
+	let internal_private = internal_desc.to_string_with_secret(&internal_keymap);
+
+	let account_id = AccountId("watchonly-spend".to_string());
+	node.import_watchonly_account(account_id.clone(), external_public, internal_public).unwrap();
+
+	// Fund the account's first address, confirm, and sync it into view.
+	let fund_addr = node.watchonly_new_address(&account_id).unwrap();
+	let fund_amount_sat = 100_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![fund_addr.clone()],
+		Amount::from_sat(fund_amount_sat),
+	)
+	.await;
+	node.sync_watchonly_accounts().unwrap();
+	assert_eq!(node.watchonly_balance(&account_id).unwrap(), fund_amount_sat);
+
+	// Build the unsigned PSBT that spends from the account to an external
+	// address. The recipient is derived from an independent master key so it does
+	// not collide with the account's own descriptors.
+	let recipient_seed: [u8; 32] = rng().random();
+	let recipient_xprv = Xpriv::new_master(Network::Regtest, &recipient_seed).unwrap();
+	let recipient_wallet = BdkWallet::create(
+		Bip84(recipient_xprv, KeychainKind::External),
+		Bip84(recipient_xprv, KeychainKind::Internal),
+	)
+	.network(Network::Regtest)
+	.create_wallet_no_persist()
+	.unwrap();
+	let recipient_addr = recipient_wallet.peek_address(KeychainKind::External, 0).address;
+	let send_amount_sat = 40_000;
+	let fee_rate = FeeRate::from_sat_per_vb(2).unwrap();
+	let psbt_base64 = node
+		.watchonly_create_psbt(
+			&account_id,
+			vec![ldk_node::PsbtRecipient {
+				address: recipient_addr.clone(),
+				amount_sats: send_amount_sat,
+			}],
+			vec![],
+			fee_rate,
+		)
+		.unwrap();
+
+	// Sign the PSBT with a wallet built from the private descriptors, mirroring
+	// the external (hardware) signer. The PSBT already carries the previous
+	// transactions and key derivations, so no chain sync of the signer is needed.
+	let signing_wallet = BdkWallet::create(external_private, internal_private)
+		.network(Network::Regtest)
+		.create_wallet_no_persist()
+		.unwrap();
+	let mut psbt = Psbt::from_str(&psbt_base64).unwrap();
+	let finalized = signing_wallet.sign(&mut psbt, SignOptions::default()).unwrap();
+	assert!(finalized, "watch-only PSBT should be fully signed by the account's keys");
+
+	// The signed transaction must pay the recipient the requested amount.
+	let signed_tx = psbt.extract_tx().unwrap();
+	let paid_to_recipient = signed_tx
+		.output
+		.iter()
+		.any(|o| o.script_pubkey == recipient_addr.script_pubkey()
+			&& o.value == Amount::from_sat(send_amount_sat));
+	assert!(paid_to_recipient, "signed tx must pay the recipient the requested amount");
+
+	// Finalize, broadcast, and confirm the spend.
+	let txid = signed_tx.compute_txid();
+	electrsd.client.transaction_broadcast(&signed_tx).unwrap();
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	wait_for_tx(&electrsd.client, txid).await;
+
+	// After the spend confirms, the account balance drops by at least the amount
+	// sent (plus fee), and the change returns to the account.
+	node.sync_watchonly_accounts().unwrap();
+	let remaining = node.watchonly_balance(&account_id).unwrap();
+	assert!(
+		remaining < fund_amount_sat - send_amount_sat,
+		"account balance should reflect the spend: remaining={} funded={} sent={}",
+		remaining,
+		fund_amount_sat,
+		send_amount_sat
+	);
+	assert!(remaining > 0, "change should return to the account");
+
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_open_fails_when_funds_insufficient() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
