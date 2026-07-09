@@ -173,6 +173,8 @@ interface Node {
 	[Throws=NodeError]
 	WatchonlyAccountPreview preview_watchonly_account(string external_descriptor, string internal_descriptor, u8 count);
 	[Throws=NodeError]
+	string watchonly_create_psbt([ByRef]AccountId account_id, sequence<PsbtRecipient> recipients, sequence<OutPoint> utxos, FeeRate fee_rate);
+	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
 	[Throws=NodeError]
 	void disconnect(PublicKey node_id);
@@ -319,6 +321,11 @@ dictionary WalletUtxo {
 dictionary WatchonlyAccountPreview {
 	sequence<Address> external_addresses;
 	sequence<Address> internal_addresses;
+};
+
+dictionary PsbtRecipient {
+	Address address;
+	u64 amount_sats;
 };
 
 interface OnchainPayment {
