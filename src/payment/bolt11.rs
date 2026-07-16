@@ -15,6 +15,7 @@ use std::time::Duration;
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::secp256k1::Secp256k1;
+use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
 use lightning::ln::channelmanager::{
 	Bolt11InvoiceParameters, Bolt11PaymentError, PaymentId, Retry, RetryableSendFailure,
 	MIN_FINAL_CLTV_EXPIRY_DELTA,
@@ -121,81 +122,10 @@ impl Bolt11Payment {
 	fn build_custom_route_hints(
 		&self, user_channel_ids: Vec<UserChannelId>,
 	) -> Result<Vec<RouteHint>, Error> {
-		if user_channel_ids.is_empty() {
-			return Err(Error::InvalidChannelId);
-		}
-
-		let channels = self.channel_manager.list_channels();
-		let mut hints = Vec::new();
-
-		for user_channel_id in user_channel_ids.into_iter().take(MAX_CUSTOM_ROUTE_HINTS) {
-			let channel = channels.iter().find(|chan| {
-				UserChannelId(chan.user_channel_id) == user_channel_id
-			});
-
-			let channel = match channel {
-				Some(channel) => channel,
-				None => {
-					log_info!(
-						self.logger,
-						"Skipping unknown user channel id {} for custom route hints",
-						user_channel_id
-					);
-					continue;
-				},
-			};
-
-			if !channel.is_channel_ready {
-				log_info!(
-					self.logger,
-					"Skipping channel {} for custom route hints as it is not ready",
-					channel.channel_id
-				);
-				continue;
-			}
-
-			let short_channel_id = match channel.inbound_scid_alias.or(channel.short_channel_id) {
-				Some(scid) => scid,
-				None => {
-					log_info!(
-						self.logger,
-						"Skipping channel {} for custom route hints as it has no inbound SCID",
-						channel.channel_id
-					);
-					continue;
-				},
-			};
-
-			let forwarding_info = match channel.counterparty.forwarding_info.as_ref() {
-				Some(info) => info,
-				None => {
-					log_info!(
-						self.logger,
-						"Skipping channel {} for custom route hints as it has no forwarding info",
-						channel.channel_id
-					);
-					continue;
-				},
-			};
-
-			hints.push(RouteHint(vec![RouteHintHop {
-				src_node_id: channel.counterparty.node_id,
-				short_channel_id,
-				fees: RoutingFees {
-					base_msat: forwarding_info.fee_base_msat,
-					proportional_millionths: forwarding_info.fee_proportional_millionths,
-				},
-				cltv_expiry_delta: forwarding_info.cltv_expiry_delta,
-				htlc_minimum_msat: channel.inbound_htlc_minimum_msat,
-				htlc_maximum_msat: channel.inbound_htlc_maximum_msat,
-			}]));
-		}
-
-		if hints.is_empty() {
-			return Err(Error::InvalidChannelId);
-		}
-
-		Ok(hints)
+		build_custom_route_hints_from_channels(
+			&self.channel_manager.list_channels(),
+			user_channel_ids,
+		)
 	}
 
 	fn create_bolt11_invoice_with_route_hints(
@@ -240,11 +170,12 @@ impl Bolt11Payment {
 			.payment_hash(payment_hash)
 			.payment_secret(payment_secret)
 			.current_timestamp()
+			.basic_mpp()
 			.min_final_cltv_expiry_delta(MIN_FINAL_CLTV_EXPIRY_DELTA.into())
 			.expiry_time(Duration::from_secs(expiry_secs.into()));
 
 		if let Some(amount_msat) = amount_msat {
-			invoice_builder = invoice_builder.amount_milli_satoshis(amount_msat).basic_mpp();
+			invoice_builder = invoice_builder.amount_milli_satoshis(amount_msat);
 		}
 
 		if route_hints_mode == RouteHintsMode::Custom {
@@ -1129,4 +1060,54 @@ impl Bolt11Payment {
 
 		Ok(())
 	}
+}
+
+fn build_custom_route_hints_from_channels(
+	channels: &[LdkChannelDetails], user_channel_ids: Vec<UserChannelId>,
+) -> Result<Vec<RouteHint>, Error> {
+	if user_channel_ids.is_empty() {
+		return Err(Error::InvalidChannelId);
+	}
+
+	if user_channel_ids.len() > MAX_CUSTOM_ROUTE_HINTS {
+		return Err(Error::InvalidChannelId);
+	}
+
+	let mut hints = Vec::with_capacity(user_channel_ids.len());
+
+	for user_channel_id in user_channel_ids {
+		let channel = channels
+			.iter()
+			.find(|chan| UserChannelId(chan.user_channel_id) == user_channel_id)
+			.ok_or(Error::InvalidChannelId)?;
+
+		if !channel.is_channel_ready {
+			return Err(Error::InvalidChannelId);
+		}
+
+		let short_channel_id = channel
+			.inbound_scid_alias
+			.or(channel.short_channel_id)
+			.ok_or(Error::InvalidChannelId)?;
+
+		let forwarding_info = channel
+			.counterparty
+			.forwarding_info
+			.as_ref()
+			.ok_or(Error::InvalidChannelId)?;
+
+		hints.push(RouteHint(vec![RouteHintHop {
+			src_node_id: channel.counterparty.node_id,
+			short_channel_id,
+			fees: RoutingFees {
+				base_msat: forwarding_info.fee_base_msat,
+				proportional_millionths: forwarding_info.fee_proportional_millionths,
+			},
+			cltv_expiry_delta: forwarding_info.cltv_expiry_delta,
+			htlc_minimum_msat: channel.inbound_htlc_minimum_msat,
+			htlc_maximum_msat: channel.inbound_htlc_maximum_msat,
+		}]));
+	}
+
+	Ok(hints)
 }
