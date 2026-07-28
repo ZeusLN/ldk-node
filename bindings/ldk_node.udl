@@ -212,10 +212,12 @@ interface Bolt11InvoiceDescription {
 	Direct(string description);
 };
 
-enum RouteHintsMode {
-	"None",
-	"Automatic",
-	"Custom",
+// Custom accepts at most 3 UserChannelId values; invalid or unusable IDs fail with InvalidChannelId.
+[Enum]
+interface RouteHints {
+	None();
+	Automatic();
+	Custom(sequence<UserChannelId> user_channel_ids);
 };
 
 interface Bolt11Payment {
@@ -238,9 +240,13 @@ interface Bolt11Payment {
 	[Throws=NodeError]
 	Bolt11Invoice receive_variable_amount([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs);
 	[Throws=NodeError]
-	Bolt11Invoice receive_with_route_hints(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, RouteHintsMode route_hints_mode, sequence<UserChannelId>? custom_route_hint_user_channel_ids);
+	Bolt11Invoice receive_with_route_hints(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, RouteHints route_hints);
 	[Throws=NodeError]
-	Bolt11Invoice receive_variable_amount_with_route_hints([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, RouteHintsMode route_hints_mode, sequence<UserChannelId>? custom_route_hint_user_channel_ids);
+	Bolt11Invoice receive_for_hash_with_route_hints(u64 amount_msat, [ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, PaymentHash payment_hash, RouteHints route_hints);
+	[Throws=NodeError]
+	Bolt11Invoice receive_variable_amount_with_route_hints([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, RouteHints route_hints);
+	[Throws=NodeError]
+	Bolt11Invoice receive_variable_amount_for_hash_with_route_hints([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, PaymentHash payment_hash, RouteHints route_hints);
 	[Throws=NodeError]
 	Bolt11Invoice receive_variable_amount_for_hash([ByRef]Bolt11InvoiceDescription description, u32 expiry_secs, PaymentHash payment_hash);
 	[Throws=NodeError]
