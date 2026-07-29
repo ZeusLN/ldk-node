@@ -26,7 +26,7 @@ use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 use crate::error::Error;
 use crate::ffi::maybe_wrap;
 use crate::logger::{log_error, LdkLogger, Logger};
-use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
+use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment, RouteHints};
 use crate::Config;
 
 type Uri<'a> = bip21::Uri<'a, NetworkChecked, Extras>;
@@ -112,6 +112,7 @@ impl UnifiedQrPayment {
 			&invoice_description,
 			expiry_sec,
 			None,
+			RouteHints::Automatic,
 		) {
 			Ok(invoice) => Some(invoice),
 			Err(e) => {

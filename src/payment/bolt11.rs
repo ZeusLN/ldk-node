@@ -14,12 +14,16 @@ use std::time::Duration;
 
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
+use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
 use lightning::ln::channelmanager::{
 	Bolt11InvoiceParameters, Bolt11PaymentError, PaymentId, Retry, RetryableSendFailure,
 };
-use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
+use lightning::routing::router::{
+	PaymentParameters, RouteHint, RouteHintHop, RouteParameters, RouteParametersConfig,
+};
 use lightning_invoice::{
 	Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescription as LdkBolt11InvoiceDescription,
+	RoutingFees,
 };
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
@@ -37,6 +41,43 @@ use crate::payment::store::{
 use crate::peer_store::{PeerInfo, PeerStore};
 use crate::runtime::Runtime;
 use crate::types::{ChannelManager, PaymentStore};
+use crate::UserChannelId;
+
+/// Maximum number of channel IDs that may be specified in [`RouteHints::Custom`].
+pub const MAX_CUSTOM_ROUTE_HINTS: usize = 3;
+
+/// Controls which route hints are included when creating a BOLT11 invoice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteHints {
+	/// Do not include any route hints in the invoice.
+	None,
+	/// Automatically select route hints from eligible channels (default).
+	Automatic,
+	/// Include route hints only for the given [`UserChannelId`]s.
+	///
+	/// At most [`MAX_CUSTOM_ROUTE_HINTS`] channel IDs may be specified. Invalid or unusable
+	/// channel IDs cause invoice creation to fail immediately. Unlike [`RouteHints::Automatic`],
+	/// no capacity, connectivity, or announcement filters are applied — the given channels are
+	/// included as hints if they are ready and have a payment SCID and forwarding info.
+	Custom {
+		/// The channel IDs to include as route hints.
+		user_channel_ids: Vec<UserChannelId>,
+	},
+}
+
+impl RouteHints {
+	fn to_ldk_override(
+		self, logger: &Logger, channels: &[LdkChannelDetails],
+	) -> Result<Option<Vec<RouteHint>>, Error> {
+		match self {
+			RouteHints::Automatic => Ok(None),
+			RouteHints::None => Ok(Some(vec![])),
+			RouteHints::Custom { user_channel_ids } => {
+				Ok(Some(build_custom_route_hints(logger, channels, user_channel_ids)?))
+			},
+		}
+	}
+}
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt11Invoice = LdkBolt11Invoice;
@@ -312,7 +353,8 @@ impl Bolt11Payment {
 	}
 
 	/// Allows to attempt manually claiming payments with the given preimage that have previously
-	/// been registered via [`receive_for_hash`] or [`receive_variable_amount_for_hash`].
+	/// been registered via [`receive_for_hash`], [`receive_variable_amount_for_hash`],
+	/// [`receive_for_hash_with_route_hints`], or [`receive_variable_amount_for_hash_with_route_hints`].
 	///
 	/// This should be called in reponse to a [`PaymentClaimable`] event as soon as the preimage is
 	/// available.
@@ -325,6 +367,8 @@ impl Bolt11Payment {
 	///
 	/// [`receive_for_hash`]: Self::receive_for_hash
 	/// [`receive_variable_amount_for_hash`]: Self::receive_variable_amount_for_hash
+	/// [`receive_for_hash_with_route_hints`]: Self::receive_for_hash_with_route_hints
+	/// [`receive_variable_amount_for_hash_with_route_hints`]: Self::receive_variable_amount_for_hash_with_route_hints
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`PaymentReceived`]: crate::Event::PaymentReceived
 	pub fn claim_for_hash(
@@ -377,7 +421,8 @@ impl Bolt11Payment {
 	}
 
 	/// Allows to manually fail payments with the given hash that have previously
-	/// been registered via [`receive_for_hash`] or [`receive_variable_amount_for_hash`].
+	/// been registered via [`receive_for_hash`], [`receive_variable_amount_for_hash`],
+	/// [`receive_for_hash_with_route_hints`], or [`receive_variable_amount_for_hash_with_route_hints`].
 	///
 	/// This should be called in reponse to a [`PaymentClaimable`] event if the payment needs to be
 	/// failed back, e.g., if the correct preimage can't be retrieved in time before the claim
@@ -388,6 +433,8 @@ impl Bolt11Payment {
 	///
 	/// [`receive_for_hash`]: Self::receive_for_hash
 	/// [`receive_variable_amount_for_hash`]: Self::receive_variable_amount_for_hash
+	/// [`receive_for_hash_with_route_hints`]: Self::receive_for_hash_with_route_hints
+	/// [`receive_variable_amount_for_hash_with_route_hints`]: Self::receive_variable_amount_for_hash_with_route_hints
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	pub fn fail_for_hash(&self, payment_hash: PaymentHash) -> Result<(), Error> {
 		let payment_id = PaymentId(payment_hash.0);
@@ -422,6 +469,20 @@ impl Bolt11Payment {
 		Ok(())
 	}
 
+	fn receive_wrapped(
+		&self, amount_msat: Option<u64>, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		payment_hash: Option<PaymentHash>, route_hints: RouteHints,
+	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_try_convert_enum(description)?;
+		Ok(maybe_wrap(self.receive_inner(
+			amount_msat,
+			&description,
+			expiry_secs,
+			payment_hash,
+			route_hints,
+		)?))
+	}
+
 	/// Returns a payable invoice that can be used to request and receive a payment of the amount
 	/// given.
 	///
@@ -429,9 +490,13 @@ impl Bolt11Payment {
 	pub fn receive(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_inner(Some(amount_msat), &description, expiry_secs, None)?;
-		Ok(maybe_wrap(invoice))
+		self.receive_wrapped(
+			Some(amount_msat),
+			description,
+			expiry_secs,
+			None,
+			RouteHints::Automatic,
+		)
 	}
 
 	/// Returns a payable invoice that can be used to request a payment of the amount
@@ -452,10 +517,57 @@ impl Bolt11Payment {
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_try_convert_enum(description)?;
-		let invoice =
-			self.receive_inner(Some(amount_msat), &description, expiry_secs, Some(payment_hash))?;
-		Ok(maybe_wrap(invoice))
+		self.receive_wrapped(
+			Some(amount_msat),
+			description,
+			expiry_secs,
+			Some(payment_hash),
+			RouteHints::Automatic,
+		)
+	}
+
+	/// Returns a payable invoice that can be used to request and receive a payment of the amount
+	/// given, with configurable route hints.
+	///
+	/// When using [`RouteHints::Custom`], at most [`MAX_CUSTOM_ROUTE_HINTS`] channel IDs may be
+	/// specified; invalid or unusable IDs fail immediately with [`Error::InvalidChannelId`].
+	///
+	/// The inbound payment will be automatically claimed upon arrival.
+	pub fn receive_with_route_hints(
+		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		route_hints: RouteHints,
+	) -> Result<Bolt11Invoice, Error> {
+		self.receive_wrapped(Some(amount_msat), description, expiry_secs, None, route_hints)
+	}
+
+	/// Returns a payable invoice that can be used to request a payment of the amount given for the
+	/// given payment hash, with configurable route hints.
+	///
+	/// When using [`RouteHints::Custom`], at most [`MAX_CUSTOM_ROUTE_HINTS`] channel IDs may be
+	/// specified; invalid or unusable IDs fail immediately with [`Error::InvalidChannelId`].
+	///
+	/// We will register the given payment hash and emit a [`PaymentClaimable`] event once the
+	/// inbound payment arrives.
+	///
+	/// **Note:** users *MUST* handle this event and claim the payment manually via
+	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+	/// [`fail_for_hash`].
+	///
+	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
+	/// [`claim_for_hash`]: Self::claim_for_hash
+	/// [`fail_for_hash`]: Self::fail_for_hash
+	pub fn receive_for_hash_with_route_hints(
+		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		payment_hash: PaymentHash, route_hints: RouteHints,
+	) -> Result<Bolt11Invoice, Error> {
+		self.receive_wrapped(
+			Some(amount_msat),
+			description,
+			expiry_secs,
+			Some(payment_hash),
+			route_hints,
+		)
 	}
 
 	/// Returns a payable invoice that can be used to request and receive a payment for which the
@@ -465,9 +577,7 @@ impl Bolt11Payment {
 	pub fn receive_variable_amount(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_inner(None, &description, expiry_secs, None)?;
-		Ok(maybe_wrap(invoice))
+		self.receive_wrapped(None, description, expiry_secs, None, RouteHints::Automatic)
 	}
 
 	/// Returns a payable invoice that can be used to request a payment for the given payment hash
@@ -487,34 +597,79 @@ impl Bolt11Payment {
 	pub fn receive_variable_amount_for_hash(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_inner(None, &description, expiry_secs, Some(payment_hash))?;
-		Ok(maybe_wrap(invoice))
+		self.receive_wrapped(
+			None,
+			description,
+			expiry_secs,
+			Some(payment_hash),
+			RouteHints::Automatic,
+		)
+	}
+
+	/// Returns a payable invoice that can be used to request and receive a payment for which the
+	/// amount is to be determined by the user, also known as a "zero-amount" invoice, with
+	/// configurable route hints.
+	///
+	/// When using [`RouteHints::Custom`], at most [`MAX_CUSTOM_ROUTE_HINTS`] channel IDs may be
+	/// specified; invalid or unusable IDs fail immediately with [`Error::InvalidChannelId`].
+	///
+	/// The inbound payment will be automatically claimed upon arrival.
+	pub fn receive_variable_amount_with_route_hints(
+		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32, route_hints: RouteHints,
+	) -> Result<Bolt11Invoice, Error> {
+		self.receive_wrapped(None, description, expiry_secs, None, route_hints)
+	}
+
+	/// Returns a payable invoice that can be used to request a payment for the given payment hash
+	/// and the amount to be determined by the user, also known as a "zero-amount" invoice, with
+	/// configurable route hints.
+	///
+	/// When using [`RouteHints::Custom`], at most [`MAX_CUSTOM_ROUTE_HINTS`] channel IDs may be
+	/// specified; invalid or unusable IDs fail immediately with [`Error::InvalidChannelId`].
+	///
+	/// We will register the given payment hash and emit a [`PaymentClaimable`] event once the
+	/// inbound payment arrives.
+	///
+	/// **Note:** users *MUST* handle this event and claim the payment manually via
+	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+	/// [`fail_for_hash`].
+	///
+	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
+	/// [`claim_for_hash`]: Self::claim_for_hash
+	/// [`fail_for_hash`]: Self::fail_for_hash
+	pub fn receive_variable_amount_for_hash_with_route_hints(
+		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32, payment_hash: PaymentHash,
+		route_hints: RouteHints,
+	) -> Result<Bolt11Invoice, Error> {
+		self.receive_wrapped(None, description, expiry_secs, Some(payment_hash), route_hints)
 	}
 
 	pub(crate) fn receive_inner(
 		&self, amount_msat: Option<u64>, invoice_description: &LdkBolt11InvoiceDescription,
-		expiry_secs: u32, manual_claim_payment_hash: Option<PaymentHash>,
+		expiry_secs: u32, manual_claim_payment_hash: Option<PaymentHash>, route_hints: RouteHints,
 	) -> Result<LdkBolt11Invoice, Error> {
-		let invoice = {
-			let invoice_params = Bolt11InvoiceParameters {
-				amount_msats: amount_msat,
-				description: invoice_description.clone(),
-				invoice_expiry_delta_secs: Some(expiry_secs),
-				payment_hash: manual_claim_payment_hash,
-				..Default::default()
-			};
+		let route_hints_override =
+			route_hints.to_ldk_override(&self.logger, &self.channel_manager.list_channels())?;
 
-			match self.channel_manager.create_bolt11_invoice(invoice_params) {
-				Ok(inv) => {
-					log_info!(self.logger, "Invoice created: {}", inv);
-					inv
-				},
-				Err(e) => {
-					log_error!(self.logger, "Failed to create invoice: {}", e);
-					return Err(Error::InvoiceCreationFailed);
-				},
-			}
+		let invoice_params = Bolt11InvoiceParameters {
+			amount_msats: amount_msat,
+			description: invoice_description.clone(),
+			invoice_expiry_delta_secs: Some(expiry_secs),
+			payment_hash: manual_claim_payment_hash,
+			route_hints_override,
+			..Default::default()
+		};
+
+		let invoice = match self.channel_manager.create_bolt11_invoice(invoice_params) {
+			Ok(inv) => {
+				log_info!(self.logger, "Invoice created: {}", inv);
+				inv
+			},
+			Err(e) => {
+				log_error!(self.logger, "Failed to create invoice: {}", e);
+				return Err(Error::InvoiceCreationFailed);
+			},
 		};
 
 		let payment_hash = PaymentHash(invoice.payment_hash().to_byte_array());
@@ -552,6 +707,22 @@ impl Bolt11Payment {
 		Ok(invoice)
 	}
 
+	fn receive_via_jit_channel_wrapped(
+		&self, amount_msat: Option<u64>, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		max_total_lsp_fee_limit_msat: Option<u64>,
+		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
+	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_try_convert_enum(description)?;
+		Ok(maybe_wrap(self.receive_via_jit_channel_inner(
+			amount_msat,
+			&description,
+			expiry_secs,
+			max_total_lsp_fee_limit_msat,
+			max_proportional_lsp_fee_limit_ppm_msat,
+			payment_hash,
+		)?))
+	}
+
 	/// Returns a payable invoice that can be used to request a payment of the amount given and
 	/// receive it via a newly created just-in-time (JIT) channel.
 	///
@@ -566,16 +737,14 @@ impl Bolt11Payment {
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_via_jit_channel_inner(
+		self.receive_via_jit_channel_wrapped(
 			Some(amount_msat),
-			&description,
+			description,
 			expiry_secs,
 			max_total_lsp_fee_limit_msat,
 			None,
 			None,
-		)?;
-		Ok(maybe_wrap(invoice))
+		)
 	}
 
 	/// Returns a payable invoice that can be used to request a payment of the amount given and
@@ -605,16 +774,14 @@ impl Bolt11Payment {
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_via_jit_channel_inner(
+		self.receive_via_jit_channel_wrapped(
 			Some(amount_msat),
-			&description,
+			description,
 			expiry_secs,
 			max_total_lsp_fee_limit_msat,
 			None,
 			Some(payment_hash),
-		)?;
-		Ok(maybe_wrap(invoice))
+		)
 	}
 
 	/// Returns a payable invoice that can be used to request a variable amount payment (also known
@@ -632,16 +799,14 @@ impl Bolt11Payment {
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_via_jit_channel_inner(
+		self.receive_via_jit_channel_wrapped(
 			None,
-			&description,
+			description,
 			expiry_secs,
 			None,
 			max_proportional_lsp_fee_limit_ppm_msat,
 			None,
-		)?;
-		Ok(maybe_wrap(invoice))
+		)
 	}
 
 	/// Returns a payable invoice that can be used to request a variable amount payment (also known
@@ -672,16 +837,14 @@ impl Bolt11Payment {
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
-		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_via_jit_channel_inner(
+		self.receive_via_jit_channel_wrapped(
 			None,
-			&description,
+			description,
 			expiry_secs,
 			None,
 			max_proportional_lsp_fee_limit_ppm_msat,
 			Some(payment_hash),
-		)?;
-		Ok(maybe_wrap(invoice))
+		)
 	}
 
 	fn receive_via_jit_channel_inner(
@@ -892,4 +1055,79 @@ impl Bolt11Payment {
 
 		Ok(())
 	}
+}
+
+fn build_custom_route_hints(
+	logger: &Logger, channels: &[LdkChannelDetails], user_channel_ids: Vec<UserChannelId>,
+) -> Result<Vec<RouteHint>, Error> {
+	let mut user_channel_ids = user_channel_ids;
+	user_channel_ids.sort_by_key(|id| id.0);
+	user_channel_ids.dedup();
+
+	if user_channel_ids.is_empty() {
+		log_error!(logger, "Custom route hints require at least one channel ID");
+		return Err(Error::InvalidChannelId);
+	}
+
+	if user_channel_ids.len() > MAX_CUSTOM_ROUTE_HINTS {
+		log_error!(
+			logger,
+			"Custom route hints support at most {} channel IDs, got {}",
+			MAX_CUSTOM_ROUTE_HINTS,
+			user_channel_ids.len()
+		);
+		return Err(Error::InvalidChannelId);
+	}
+
+	user_channel_ids
+		.into_iter()
+		.map(|user_channel_id| route_hint_from_channel(logger, channels, user_channel_id))
+		.collect()
+}
+
+fn route_hint_from_channel(
+	logger: &Logger, channels: &[LdkChannelDetails], user_channel_id: UserChannelId,
+) -> Result<RouteHint, Error> {
+	let channel = channels
+		.iter()
+		.find(|chan| UserChannelId(chan.user_channel_id) == user_channel_id)
+		.ok_or_else(|| {
+			log_error!(logger, "Custom route hint channel ID {} is unknown", user_channel_id.0);
+			Error::InvalidChannelId
+		})?;
+
+	if !channel.is_channel_ready {
+		log_error!(logger, "Custom route hint channel ID {} is not ready", user_channel_id.0);
+		return Err(Error::InvalidChannelId);
+	}
+
+	let short_channel_id = channel.get_inbound_payment_scid().ok_or_else(|| {
+		log_error!(
+			logger,
+			"Custom route hint channel ID {} has no short channel ID yet",
+			user_channel_id.0
+		);
+		Error::InvalidChannelId
+	})?;
+
+	let forwarding_info = channel.counterparty.forwarding_info.as_ref().ok_or_else(|| {
+		log_error!(
+			logger,
+			"Custom route hint channel ID {} has no forwarding info yet; retry after the peer's first channel_update is processed",
+			user_channel_id.0
+		);
+		Error::InvalidChannelId
+	})?;
+
+	Ok(RouteHint(vec![RouteHintHop {
+		src_node_id: channel.counterparty.node_id,
+		short_channel_id,
+		fees: RoutingFees {
+			base_msat: forwarding_info.fee_base_msat,
+			proportional_millionths: forwarding_info.fee_proportional_millionths,
+		},
+		cltv_expiry_delta: forwarding_info.cltv_expiry_delta,
+		htlc_minimum_msat: channel.inbound_htlc_minimum_msat,
+		htlc_maximum_msat: channel.inbound_htlc_maximum_msat,
+	}]))
 }
