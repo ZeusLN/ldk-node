@@ -12,8 +12,8 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use bitcoin::hashes::Hash;
 use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
 use lightning::ln::channelmanager::{
 	Bolt11InvoiceParameters, Bolt11PaymentError, PaymentId, Retry, RetryableSendFailure,
@@ -72,9 +72,9 @@ impl RouteHints {
 		match self {
 			RouteHints::Automatic => Ok(None),
 			RouteHints::None => Ok(Some(vec![])),
-			RouteHints::Custom { user_channel_ids } => Ok(Some(build_custom_route_hints(
-				logger, channels, user_channel_ids,
-			)?)),
+			RouteHints::Custom { user_channel_ids } => {
+				Ok(Some(build_custom_route_hints(logger, channels, user_channel_ids)?))
+			},
 		}
 	}
 }
@@ -470,12 +470,16 @@ impl Bolt11Payment {
 	}
 
 	fn receive_wrapped(
-		&self, amount_msat: Option<u64>, description: &Bolt11InvoiceDescription,
-		expiry_secs: u32, payment_hash: Option<PaymentHash>, route_hints: RouteHints,
+		&self, amount_msat: Option<u64>, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		payment_hash: Option<PaymentHash>, route_hints: RouteHints,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
 		Ok(maybe_wrap(self.receive_inner(
-			amount_msat, &description, expiry_secs, payment_hash, route_hints,
+			amount_msat,
+			&description,
+			expiry_secs,
+			payment_hash,
+			route_hints,
 		)?))
 	}
 
@@ -487,7 +491,11 @@ impl Bolt11Payment {
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
 		self.receive_wrapped(
-			Some(amount_msat), description, expiry_secs, None, RouteHints::Automatic,
+			Some(amount_msat),
+			description,
+			expiry_secs,
+			None,
+			RouteHints::Automatic,
 		)
 	}
 
@@ -510,12 +518,19 @@ impl Bolt11Payment {
 		payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
 		self.receive_wrapped(
-			Some(amount_msat), description, expiry_secs, Some(payment_hash), RouteHints::Automatic,
+			Some(amount_msat),
+			description,
+			expiry_secs,
+			Some(payment_hash),
+			RouteHints::Automatic,
 		)
 	}
 
 	/// Returns a payable invoice that can be used to request and receive a payment of the amount
 	/// given, with configurable route hints.
+	///
+	/// When using [`RouteHints::Custom`], at most [`MAX_CUSTOM_ROUTE_HINTS`] channel IDs may be
+	/// specified; invalid or unusable IDs fail immediately with [`Error::InvalidChannelId`].
 	///
 	/// The inbound payment will be automatically claimed upon arrival.
 	pub fn receive_with_route_hints(
@@ -527,6 +542,9 @@ impl Bolt11Payment {
 
 	/// Returns a payable invoice that can be used to request a payment of the amount given for the
 	/// given payment hash, with configurable route hints.
+	///
+	/// When using [`RouteHints::Custom`], at most [`MAX_CUSTOM_ROUTE_HINTS`] channel IDs may be
+	/// specified; invalid or unusable IDs fail immediately with [`Error::InvalidChannelId`].
 	///
 	/// We will register the given payment hash and emit a [`PaymentClaimable`] event once the
 	/// inbound payment arrives.
@@ -544,7 +562,11 @@ impl Bolt11Payment {
 		payment_hash: PaymentHash, route_hints: RouteHints,
 	) -> Result<Bolt11Invoice, Error> {
 		self.receive_wrapped(
-			Some(amount_msat), description, expiry_secs, Some(payment_hash), route_hints,
+			Some(amount_msat),
+			description,
+			expiry_secs,
+			Some(payment_hash),
+			route_hints,
 		)
 	}
 
@@ -576,13 +598,20 @@ impl Bolt11Payment {
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
 		self.receive_wrapped(
-			None, description, expiry_secs, Some(payment_hash), RouteHints::Automatic,
+			None,
+			description,
+			expiry_secs,
+			Some(payment_hash),
+			RouteHints::Automatic,
 		)
 	}
 
 	/// Returns a payable invoice that can be used to request and receive a payment for which the
 	/// amount is to be determined by the user, also known as a "zero-amount" invoice, with
 	/// configurable route hints.
+	///
+	/// When using [`RouteHints::Custom`], at most [`MAX_CUSTOM_ROUTE_HINTS`] channel IDs may be
+	/// specified; invalid or unusable IDs fail immediately with [`Error::InvalidChannelId`].
 	///
 	/// The inbound payment will be automatically claimed upon arrival.
 	pub fn receive_variable_amount_with_route_hints(
@@ -613,19 +642,15 @@ impl Bolt11Payment {
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32, payment_hash: PaymentHash,
 		route_hints: RouteHints,
 	) -> Result<Bolt11Invoice, Error> {
-		self.receive_wrapped(
-			None, description, expiry_secs, Some(payment_hash), route_hints,
-		)
+		self.receive_wrapped(None, description, expiry_secs, Some(payment_hash), route_hints)
 	}
 
 	pub(crate) fn receive_inner(
 		&self, amount_msat: Option<u64>, invoice_description: &LdkBolt11InvoiceDescription,
 		expiry_secs: u32, manual_claim_payment_hash: Option<PaymentHash>, route_hints: RouteHints,
 	) -> Result<LdkBolt11Invoice, Error> {
-		let route_hints_override = route_hints.to_ldk_override(
-			&self.logger,
-			&self.channel_manager.list_channels(),
-		)?;
+		let route_hints_override =
+			route_hints.to_ldk_override(&self.logger, &self.channel_manager.list_channels())?;
 
 		let invoice_params = Bolt11InvoiceParameters {
 			amount_msats: amount_msat,
@@ -683,8 +708,8 @@ impl Bolt11Payment {
 	}
 
 	fn receive_via_jit_channel_wrapped(
-		&self, amount_msat: Option<u64>, description: &Bolt11InvoiceDescription,
-		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
+		&self, amount_msat: Option<u64>, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		max_total_lsp_fee_limit_msat: Option<u64>,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
@@ -713,7 +738,12 @@ impl Bolt11Payment {
 		max_total_lsp_fee_limit_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
 		self.receive_via_jit_channel_wrapped(
-			Some(amount_msat), description, expiry_secs, max_total_lsp_fee_limit_msat, None, None,
+			Some(amount_msat),
+			description,
+			expiry_secs,
+			max_total_lsp_fee_limit_msat,
+			None,
+			None,
 		)
 	}
 
@@ -770,7 +800,12 @@ impl Bolt11Payment {
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
 		self.receive_via_jit_channel_wrapped(
-			None, description, expiry_secs, None, max_proportional_lsp_fee_limit_ppm_msat, None,
+			None,
+			description,
+			expiry_secs,
+			None,
+			max_proportional_lsp_fee_limit_ppm_msat,
+			None,
 		)
 	}
 
