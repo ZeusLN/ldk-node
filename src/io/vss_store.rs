@@ -706,11 +706,18 @@ fn derive_data_encryption_and_obfuscation_keys(vss_seed: &[u8; 32]) -> ([u8; 32]
 fn retry_policy() -> CustomRetryPolicy {
 	// Each HTTP request is capped at 10s by the client (`DEFAULT_TIMEOUT` in
 	// `vss_client`), so the retry budget bounds how long a single VSS
-	// operation can block: at most 6 attempts * 10s + ~6s of backoff. Mobile
-	// callers wrap `build_with_dual_store*` in their own watchdog timeout —
-	// an unreachable server must surface as an error well before that fires,
-	// rather than keeping the build alive in a thread the caller has
-	// abandoned.
+	// operation can block: at most 6 attempts * 10s + ~4s of backoff
+	// (gaps of 100..1600ms plus jitter), i.e. ~64s worst case. The 30s
+	// max-total-delay is a safety cap only — 6 attempts can't reach it.
+	//
+	// This tuning assumes ZEUS's deployment: dual-store (local-first, VSS
+	// pushes are best-effort and reconciled by bulk sync next session) with
+	// fixed-header auth. Mobile callers wrap `build_with_dual_store*` in
+	// their own watchdog timeout — an unreachable server must surface as an
+	// error well before that fires, rather than keeping the build alive in
+	// a thread the caller has abandoned. A standalone `build_with_vss_store`
+	// deployment, where exhausted persist retries can be fatal to LDK,
+	// would want a larger budget.
 	ExponentialBackoffRetryPolicy::new(Duration::from_millis(100))
 		.with_max_attempts(6)
 		.with_max_total_delay(Duration::from_secs(30))
@@ -721,6 +728,12 @@ fn retry_policy() -> CustomRetryPolicy {
 				VssError::NoSuchKeyError(..)
 					| VssError::InvalidRequestError(..)
 					| VssError::ConflictError(..)
+					// With fixed-header auth an AuthError is a deterministic
+					// server rejection (e.g. clock skew) that retries can't
+					// fix. Header-provider failures are also mapped to
+					// AuthError, so an lnurl-auth deployment — where token
+					// fetches can fail transiently and succeed on retry —
+					// should not skip these.
 					| VssError::AuthError(..)
 			)
 		}) as _)
