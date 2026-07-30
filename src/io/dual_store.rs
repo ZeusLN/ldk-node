@@ -16,22 +16,34 @@
 //! **Reads always go to local.** Local SQLite is the source of truth. VSS is only consulted
 //! for reads during a restore-from-seed, detected automatically when the local store is empty
 //! at construction time. Once local has data, VSS is never read — preventing stale VSS data
-//! from causing channel state mismatches and force closes.
+//! from causing channel state mismatches and force closes. During a restore, VSS errors other
+//! than `NotFound` are propagated (failing the build) rather than masked: treating an
+//! unreachable VSS as an empty one would silently produce a fresh node with no channels.
 //!
 //! **Writes go to local first, then VSS (best-effort).** If the VSS write fails the data is
 //! still safe in local. The next write will try VSS again.
 //!
-//! **Background bulk sync.** On construction, a background thread is spawned that reads every
-//! key from local SQLite and writes each one to VSS. This catches up any data that was written
-//! while VSS was down. The sync runs independently with its own 60-second timeout and does not
-//! block node startup.
+//! **Push safety gate.** All pushes to VSS (per-key writes, removes, and the bulk sync) are
+//! gated on a per-session safety check: if the local store has no channel monitors (active or
+//! archived) while VSS holds at least one, the local state is presumed to be a fresh node
+//! built over an existing backup, and every VSS write is disabled for the session to avoid
+//! overwriting the only copy of the real channel state. See [`vss_push_verdict`].
+//!
+//! **Background bulk sync.** On construction (except in restore mode), a background thread is
+//! spawned that reads every key from local SQLite and writes each one to VSS. This catches up
+//! any data that was written while VSS was down. The sync runs independently with its own
+//! 60-second timeout and does not block node startup.
 
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lightning::io;
-use lightning::util::persist::{KVStore, KVStoreSync};
+use lightning::util::persist::{
+	KVStore, KVStoreSync, ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+	ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+	CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 // Note: we use eprintln! instead of the `log` crate because the DualStore is constructed
 // before the LDK Node Logger is available, and the `log` facade may not be initialized.
 // eprintln! reliably reaches the device console on both iOS and Android.
@@ -62,8 +74,9 @@ const BULK_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
 /// - **Restore mode**: list from local first; if empty, fall back to VSS.
 ///
 /// ## Background bulk sync
-/// On construction, spawns a background thread that syncs all local keys to VSS with a
-/// 60-second timeout. Does not block node startup.
+/// On construction (except in restore mode), spawns a background thread that syncs all local
+/// keys to VSS with a 60-second timeout, subject to the push safety gate. Does not block node
+/// startup.
 ///
 /// **Restore mode** is auto-detected: if the local store is empty at construction time,
 /// restore mode is enabled and reads will fall back to VSS. Otherwise, reads are local-only.
@@ -73,13 +86,21 @@ pub struct DualStore {
 	/// When true, reads fall back to VSS on local `NotFound`. Auto-detected at construction:
 	/// `true` if local was empty (restore-from-seed), `false` otherwise.
 	restore_mode: bool,
+	/// Lazily-determined verdict on whether pushing local state to VSS is safe. `None` means
+	/// undetermined (e.g. VSS unreachable during the check): pushes are skipped and the check
+	/// retried on the next push attempt. The mutex also single-flights the check itself, so a
+	/// burst of first pushes doesn't fan out into parallel VSS list calls. See
+	/// [`vss_push_verdict`].
+	push_gate: Arc<Mutex<Option<bool>>>,
 }
 
 impl DualStore {
 	/// Creates a new [`DualStore`] wrapping the given [`VssStore`] and [`SqliteStore`].
 	///
-	/// Spawns a background thread to bulk-sync all local keys to VSS. This catches up any
-	/// data written while VSS was previously unreachable. The sync does not block construction.
+	/// Unless restore mode is detected (local store empty — nothing to catch up), spawns a
+	/// background thread to bulk-sync all local keys to VSS, subject to the push safety
+	/// check ([`vss_push_verdict`]). This catches up any data written while VSS was
+	/// previously unreachable. The sync does not block construction.
 	pub fn new(vss: VssStore, local: SqliteStore) -> Self {
 		let vss = Arc::new(vss);
 		let local = Arc::new(local);
@@ -103,17 +124,137 @@ impl DualStore {
 			},
 		};
 
-		// Spawn background bulk sync (local → VSS)
-		let vss_bg = Arc::clone(&vss);
-		let local_bg = Arc::clone(&local);
-		std::thread::Builder::new()
-			.name("dual-store-bulk-sync".to_string())
-			.spawn(move || {
-				bulk_sync_to_vss(&local_bg, &vss_bg);
-			})
-			.expect("Failed to spawn bulk sync thread");
+		// A legitimate restore (local empty at construction) pre-arms the gate open:
+		// everything in local derives from VSS reads or live node operation, so pushing
+		// it back cannot destroy anything.
+		let push_gate = Arc::new(Mutex::new(if restore_mode { Some(true) } else { None }));
 
-		Self { vss, local, restore_mode }
+		if restore_mode {
+			// Nothing to catch up — local started empty this session.
+			eprintln!("DualStore: Restore mode — skipping background bulk sync");
+		} else {
+			// Spawn background bulk sync (local → VSS)
+			let vss_bg = Arc::clone(&vss);
+			let local_bg = Arc::clone(&local);
+			let gate_bg = Arc::clone(&push_gate);
+			std::thread::Builder::new()
+				.name("dual-store-bulk-sync".to_string())
+				.spawn(move || match vss_push_verdict(&gate_bg, &local_bg, &vss_bg) {
+					PushVerdict::Allowed => bulk_sync_to_vss(&local_bg, &vss_bg),
+					PushVerdict::Undetermined => {
+						eprintln!("DualStore: Bulk sync skipped — push safety not yet determined");
+					},
+					PushVerdict::Disabled => {
+						eprintln!("DualStore: Bulk sync skipped — VSS pushes disabled this session");
+					},
+				})
+				.expect("Failed to spawn bulk sync thread");
+		}
+
+		Self { vss, local, restore_mode, push_gate }
+	}
+}
+
+/// Outcome of the push safety check. See [`vss_push_verdict`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PushVerdict {
+	/// Pushing local data to VSS is safe.
+	Allowed,
+	/// Safety could not be determined (a store could not be listed). The current push is
+	/// skipped (local data is safe; a later bulk sync catches VSS up) and the check runs
+	/// again on the next push attempt.
+	Undetermined,
+	/// The poison signature was detected — all VSS pushes are disabled for this session.
+	Disabled,
+}
+
+/// Determines whether pushing local data to VSS is safe.
+///
+/// Poison signature: local has no channel monitors (active or archived) while VSS has at
+/// least one. That state means VSS knows about channels this device does not — it can only
+/// arise when a fresh node was built locally over an existing backup (e.g. a restore that
+/// fell back to an empty local store). Pushing local keys would overwrite the only copy of
+/// the real channel state, so all VSS writes are disabled for the session.
+///
+/// The verdict is cached once determined ([`PushVerdict::Undetermined`] is never cached).
+/// The check runs while holding the gate mutex, single-flighting it: a burst of first
+/// pushes queues on the lock instead of fanning out into parallel VSS list calls, and
+/// once one thread determines the verdict the rest read it from the cache.
+///
+/// ## Limitations
+///
+/// - The check is defeated once a poisoned local store gains a channel monitor of its own
+///   (e.g. the user opens a new channel from the fresh node in a later session): the local
+///   listing is then non-empty and pushes resume, overwriting the backed-up manager. Closing
+///   that hole would require content-level reconciliation; the gate protects the common case
+///   of a poisoned device with no new channel activity.
+/// - While pushes are disabled, the session runs with no VSS backup at all — including for
+///   any new channels opened during it. The logged recovery instruction (restore from seed
+///   into a new wallet) is the intended path; a wallet should not be operated long-term in
+///   this state.
+fn vss_push_verdict(
+	gate: &Mutex<Option<bool>>, local: &SqliteStore, vss: &VssStore,
+) -> PushVerdict {
+	// A panicked holder can't invalidate a plain Option cache — recover the guard rather
+	// than wedging every future push on a poisoned mutex.
+	let mut verdict_slot = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+	if let Some(allowed) = *verdict_slot {
+		return if allowed { PushVerdict::Allowed } else { PushVerdict::Disabled };
+	}
+
+	let monitors = KVStoreSync::list(
+		local,
+		CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+	);
+	let archived = KVStoreSync::list(
+		local,
+		ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+		ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+	);
+	let local_has_monitor_history = match (monitors, archived) {
+		(Ok(monitors), Ok(archived)) => !monitors.is_empty() || !archived.is_empty(),
+		_ => {
+			eprintln!("DualStore: Could not list local monitors to verify push safety");
+			return PushVerdict::Undetermined;
+		},
+	};
+
+	if local_has_monitor_history {
+		// This device has (or had) channels of its own — normal operation.
+		*verdict_slot = Some(true);
+		return PushVerdict::Allowed;
+	}
+
+	// Local has no monitor history. Only safe to push if VSS has none either.
+	match KVStoreSync::list(
+		vss,
+		CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+	) {
+		Ok(vss_monitors) => {
+			if vss_monitors.is_empty() {
+				*verdict_slot = Some(true);
+				PushVerdict::Allowed
+			} else {
+				eprintln!(
+					"DualStore: CRITICAL — VSS holds {} channel monitor(s) but the local store has none. \
+					 Local state looks like a fresh node built over an existing backup; disabling all VSS \
+					 writes this session to avoid overwriting the backup. Recover by restoring from seed \
+					 into a new wallet.",
+					vss_monitors.len()
+				);
+				*verdict_slot = Some(false);
+				PushVerdict::Disabled
+			}
+		},
+		Err(e) => {
+			eprintln!(
+				"DualStore: Could not list VSS monitors to verify push safety: {}",
+				e
+			);
+			PushVerdict::Undetermined
+		},
 	}
 }
 
@@ -231,9 +372,20 @@ impl KVStoreSync for DualStore {
 						}
 						Ok(data)
 					},
-					Err(_) => {
+					Err(vss_err) if vss_err.kind() == io::ErrorKind::NotFound => {
 						// Neither store has it — return the original NotFound.
 						Err(local_err)
+					},
+					Err(vss_err) => {
+						// A network/auth/server error during restore must NOT be masked as
+						// NotFound: that would make the node come up fresh (no channels)
+						// and look like a successful restore. Fail the read — and thereby
+						// the build — so the caller can surface the error and retry.
+						eprintln!(
+							"DualStore: VSS read failed during restore for {}/{}/{}: {}",
+							primary_namespace, secondary_namespace, key, vss_err
+						);
+						Err(vss_err)
 					},
 				}
 			},
@@ -256,18 +408,31 @@ impl KVStoreSync for DualStore {
 		// Write to VSS in background (fire-and-forget).
 		// VssStore retries for up to 180s — we must not block the caller.
 		let vss = Arc::clone(&self.vss);
+		let local = Arc::clone(&self.local);
+		let gate = Arc::clone(&self.push_gate);
 		let pns = primary_namespace.to_string();
 		let sns = secondary_namespace.to_string();
 		let k = key.to_string();
 		std::thread::Builder::new()
 			.name("dual-store-vss-write".to_string())
-			.spawn(move || {
-				if let Err(e) = KVStoreSync::write(vss.as_ref(), &pns, &sns, &k, buf) {
+			.spawn(move || match vss_push_verdict(&gate, &local, &vss) {
+				PushVerdict::Allowed => {
+					if let Err(e) = KVStoreSync::write(vss.as_ref(), &pns, &sns, &k, buf) {
+						eprintln!(
+							"DualStore: VSS write failed for {}/{}/{} (local succeeded): {}",
+							pns, sns, k, e
+						);
+					}
+				},
+				PushVerdict::Undetermined => {
 					eprintln!(
-						"DualStore: VSS write failed for {}/{}/{} (local succeeded): {}",
-						pns, sns, k, e
+						"DualStore: VSS write skipped for {}/{}/{} (push safety not yet determined)",
+						pns, sns, k
 					);
-				}
+				},
+				// The CRITICAL line logged at verdict time explains the situation —
+				// stay quiet per key to avoid burying it.
+				PushVerdict::Disabled => {},
 			})
 			.ok();
 
@@ -288,18 +453,31 @@ impl KVStoreSync for DualStore {
 
 		// VSS removal in background (fire-and-forget)
 		let vss = Arc::clone(&self.vss);
+		let local = Arc::clone(&self.local);
+		let gate = Arc::clone(&self.push_gate);
 		let pns = primary_namespace.to_string();
 		let sns = secondary_namespace.to_string();
 		let k = key.to_string();
 		std::thread::Builder::new()
 			.name("dual-store-vss-remove".to_string())
-			.spawn(move || {
-				if let Err(e) = KVStoreSync::remove(vss.as_ref(), &pns, &sns, &k, lazy) {
+			.spawn(move || match vss_push_verdict(&gate, &local, &vss) {
+				PushVerdict::Allowed => {
+					if let Err(e) = KVStoreSync::remove(vss.as_ref(), &pns, &sns, &k, lazy) {
+						eprintln!(
+							"DualStore: VSS remove failed for {}/{}/{} (local succeeded): {}",
+							pns, sns, k, e
+						);
+					}
+				},
+				PushVerdict::Undetermined => {
 					eprintln!(
-						"DualStore: VSS remove failed for {}/{}/{} (local succeeded): {}",
-						pns, sns, k, e
+						"DualStore: VSS remove skipped for {}/{}/{} (push safety not yet determined)",
+						pns, sns, k
 					);
-				}
+				},
+				// The CRITICAL line logged at verdict time explains the situation —
+				// stay quiet per key to avoid burying it.
+				PushVerdict::Disabled => {},
 			})
 			.ok();
 
@@ -322,11 +500,14 @@ impl KVStoreSync for DualStore {
 		match KVStoreSync::list(self.vss.as_ref(), primary_namespace, secondary_namespace) {
 			Ok(vss_keys) => Ok(vss_keys),
 			Err(e) => {
+				// Same rationale as in read(): masking a VSS failure as an empty
+				// namespace during restore silently produces a fresh node. Propagate
+				// so the restore fails loudly instead.
 				eprintln!(
-					"DualStore: VSS list failed for {}/{}: {}",
+					"DualStore: VSS list failed during restore for {}/{}: {}",
 					primary_namespace, secondary_namespace, e
 				);
-				Ok(local_keys)
+				Err(e)
 			},
 		}
 	}
