@@ -704,9 +704,16 @@ fn derive_data_encryption_and_obfuscation_keys(vss_seed: &[u8; 32]) -> ([u8; 32]
 }
 
 fn retry_policy() -> CustomRetryPolicy {
-	ExponentialBackoffRetryPolicy::new(Duration::from_millis(10))
-		.with_max_attempts(100)
-		.with_max_total_delay(Duration::from_secs(180))
+	// Each HTTP request is capped at 10s by the client (`DEFAULT_TIMEOUT` in
+	// `vss_client`), so the retry budget bounds how long a single VSS
+	// operation can block: at most 6 attempts * 10s + ~6s of backoff. Mobile
+	// callers wrap `build_with_dual_store*` in their own watchdog timeout —
+	// an unreachable server must surface as an error well before that fires,
+	// rather than keeping the build alive in a thread the caller has
+	// abandoned.
+	ExponentialBackoffRetryPolicy::new(Duration::from_millis(100))
+		.with_max_attempts(6)
+		.with_max_total_delay(Duration::from_secs(30))
 		.with_max_jitter(Duration::from_millis(100))
 		.skip_retry_on_error(Box::new(|e: &VssError| {
 			matches!(
@@ -714,6 +721,7 @@ fn retry_policy() -> CustomRetryPolicy {
 				VssError::NoSuchKeyError(..)
 					| VssError::InvalidRequestError(..)
 					| VssError::ConflictError(..)
+					| VssError::AuthError(..)
 			)
 		}) as _)
 }
