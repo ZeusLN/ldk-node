@@ -116,6 +116,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 pub use closed_channel::ClosedChannelDetails;
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Amount, OutPoint, WPubkeyHash};
 #[cfg(feature = "uniffi")]
@@ -138,7 +140,10 @@ use fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use ffi::*;
 use gossip::GossipSource;
 use graph::NetworkGraph;
-use io::utils::write_node_metrics;
+use io::utils::{
+	is_valid_kvstore_str, remove_watchonly_account_marker, watchonly_account_marker_exists,
+	write_node_metrics, write_watchonly_account_marker,
+};
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::{Input, Wallet as LdkWallet};
 use lightning::impl_writeable_tlv_based;
@@ -164,9 +169,12 @@ use runtime::Runtime;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, ClosedChannelStore,
 	DynStore, Graph, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer,
-	Sweeper, Wallet,
+	Sweeper, Wallet, WatchOnlyWallet,
 };
-pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
+pub use types::{
+	AccountId, ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId,
+};
+pub use wallet::watchonly::{PsbtRecipient, WatchonlyAccountPreview};
 pub use {
 	bip39, bitcoin, lightning, lightning_invoice, lightning_liquidity, lightning_types, tokio,
 	vss_client,
@@ -186,6 +194,7 @@ pub struct Node {
 	background_processor_stop_sender: tokio::sync::watch::Sender<()>,
 	config: Arc<Config>,
 	wallet: Arc<Wallet>,
+	watchonly_wallets: Arc<Mutex<HashMap<AccountId, Arc<WatchOnlyWallet>>>>,
 	chain_source: Arc<ChainSource>,
 	tx_broadcaster: Arc<Broadcaster>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
@@ -953,6 +962,177 @@ impl Node {
 		))
 	}
 
+	/// Imports a watch-only on-chain account from public external and internal
+	/// descriptors, registering it under `account_id`.
+	///
+	/// The descriptors must be public (key-only); a watch-only account holds no
+	/// private keys and signs off-device via PSBT. The account is added to a
+	/// persisted index and its state is persisted under its own KVStore
+	/// namespace, so `account_id` must be non-empty, unique, and consist of
+	/// alphanumeric characters, `-`, or `_`: importing an `account_id` that
+	/// was already imported fails.
+	pub fn import_watchonly_account(
+		&self, account_id: AccountId, external_descriptor: String, internal_descriptor: String,
+	) -> Result<(), Error> {
+		if account_id.0.is_empty() || !is_valid_kvstore_str(&account_id.0) {
+			log_error!(self.logger, "Invalid watch-only account id: {}", account_id.0);
+			return Err(Error::WalletOperationFailed);
+		}
+
+		// Hold the lock for the whole sequence to serialize concurrent imports.
+		let mut wallets = self.watchonly_wallets.lock().unwrap();
+
+		if watchonly_account_marker_exists(
+			&account_id.0,
+			Arc::clone(&self.kv_store),
+			Arc::clone(&self.logger),
+		)? {
+			log_error!(self.logger, "Watch-only account {} was already imported.", account_id.0);
+			return Err(Error::WalletOperationFailed);
+		}
+
+		// Index the account before creating the wallet: a dangling index entry is
+		// recoverable, while persisted wallet state missing from the index is not.
+		write_watchonly_account_marker(
+			&account_id.0,
+			Arc::clone(&self.kv_store),
+			Arc::clone(&self.logger),
+		)?;
+
+		let wallet = match WatchOnlyWallet::import(
+			external_descriptor,
+			internal_descriptor,
+			self.config.network,
+			Arc::clone(&self.kv_store),
+			account_id.0.clone(),
+			Arc::clone(&self.logger),
+		) {
+			Ok(wallet) => wallet,
+			Err(e) => {
+				let _ = remove_watchonly_account_marker(
+					&account_id.0,
+					Arc::clone(&self.kv_store),
+					Arc::clone(&self.logger),
+				);
+				return Err(e);
+			},
+		};
+		wallets.insert(account_id, Arc::new(wallet));
+		Ok(())
+	}
+
+	/// Reveals the next unused external (receive) address for the watch-only
+	/// account registered under `account_id`.
+	pub fn watchonly_new_address(&self, account_id: &AccountId) -> Result<Address, Error> {
+		let wallet = {
+			let wallets = self.watchonly_wallets.lock().unwrap();
+			wallets.get(account_id).ok_or(Error::WalletOperationFailed)?.clone()
+		};
+		wallet.new_address()
+	}
+
+	/// Returns the total balance (in sats) of the watch-only account
+	/// registered under `account_id`.
+	pub fn watchonly_balance(&self, account_id: &AccountId) -> Result<u64, Error> {
+		let wallet = {
+			let wallets = self.watchonly_wallets.lock().unwrap();
+			wallets.get(account_id).ok_or(Error::WalletOperationFailed)?.clone()
+		};
+		Ok(wallet.balance())
+	}
+
+	/// Lists the unspent outputs (UTXOs) of the watch-only account registered
+	/// under `account_id`.
+	pub fn watchonly_list_utxos(&self, account_id: &AccountId) -> Result<Vec<WalletUtxo>, Error> {
+		let wallet = {
+			let wallets = self.watchonly_wallets.lock().unwrap();
+			wallets.get(account_id).ok_or(Error::WalletOperationFailed)?.clone()
+		};
+		wallet.list_utxos()
+	}
+
+	/// Lists the revealed receive addresses of the watch-only account
+	/// registered under `account_id`.
+	pub fn watchonly_list_addresses(&self, account_id: &AccountId) -> Result<Vec<Address>, Error> {
+		let wallet = {
+			let wallets = self.watchonly_wallets.lock().unwrap();
+			wallets.get(account_id).ok_or(Error::WalletOperationFailed)?.clone()
+		};
+		Ok(wallet.list_addresses())
+	}
+
+	/// Lists the ids of all currently imported watch-only accounts.
+	///
+	/// This reflects the accounts restored from persistence at startup plus any
+	/// imported since, and is the source of truth for which accounts exist.
+	pub fn list_watchonly_accounts(&self) -> Vec<AccountId> {
+		let wallets = self.watchonly_wallets.lock().unwrap();
+		let mut account_ids: Vec<AccountId> = wallets.keys().cloned().collect();
+		account_ids.sort_by(|a, b| a.0.cmp(&b.0));
+		account_ids
+	}
+
+	/// Derives the first `count` external (receive) and internal (change)
+	/// addresses from the given public descriptors without importing or
+	/// persisting anything, allowing an account to be verified against its
+	/// originating wallet before import.
+	pub fn preview_watchonly_account(
+		&self, external_descriptor: String, internal_descriptor: String, count: u8,
+	) -> Result<WatchonlyAccountPreview, Error> {
+		WatchOnlyWallet::preview(
+			external_descriptor,
+			internal_descriptor,
+			self.config.network,
+			count,
+			Arc::clone(&self.logger),
+		)
+	}
+
+	/// Builds an unsigned PSBT spending from the watch-only account registered
+	/// under `account_id`, returned as a base64 string ready to be signed on an
+	/// external (hardware) device.
+	///
+	/// If `utxos` is empty the account selects its own inputs; otherwise exactly
+	/// the given outpoints are spent. All recipient addresses must belong to the
+	/// node's network.
+	//
+	// UniFFI exposes `bitcoin::FeeRate` as an interface, so it arrives wrapped in
+	// an `Arc` under that feature and as the plain type otherwise.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn watchonly_create_psbt(
+		&self, account_id: &AccountId, recipients: Vec<PsbtRecipient>, utxos: Vec<OutPoint>,
+		fee_rate: bitcoin::FeeRate,
+	) -> Result<String, Error> {
+		self.watchonly_create_psbt_inner(account_id, recipients, utxos, fee_rate)
+	}
+
+	/// Builds an unsigned PSBT spending from the watch-only account registered
+	/// under `account_id`, returned as a base64 string ready to be signed on an
+	/// external (hardware) device.
+	///
+	/// If `utxos` is empty the account selects its own inputs; otherwise exactly
+	/// the given outpoints are spent. All recipient addresses must belong to the
+	/// node's network.
+	#[cfg(feature = "uniffi")]
+	pub fn watchonly_create_psbt(
+		&self, account_id: &AccountId, recipients: Vec<PsbtRecipient>, utxos: Vec<OutPoint>,
+		fee_rate: Arc<bitcoin::FeeRate>,
+	) -> Result<String, Error> {
+		self.watchonly_create_psbt_inner(account_id, recipients, utxos, *fee_rate)
+	}
+
+	fn watchonly_create_psbt_inner(
+		&self, account_id: &AccountId, recipients: Vec<PsbtRecipient>, utxos: Vec<OutPoint>,
+		fee_rate: bitcoin::FeeRate,
+	) -> Result<String, Error> {
+		let wallet = {
+			let wallets = self.watchonly_wallets.lock().unwrap();
+			wallets.get(account_id).ok_or(Error::WalletOperationFailed)?.clone()
+		};
+		let psbt = wallet.create_psbt(recipients, utxos, fee_rate)?;
+		Ok(BASE64_STANDARD.encode(psbt.serialize()))
+	}
+
 	/// Returns a payment handler allowing to create [BIP 21] URIs with an on-chain, [BOLT 11],
 	/// and [BOLT 12] payment options.
 	///
@@ -1641,6 +1821,25 @@ impl Node {
 					.await?;
 			}
 			let _ = sync_sweeper.regenerate_and_broadcast_spend_if_necessary().await;
+			Ok(())
+		})
+	}
+
+	/// Syncs the on-chain state of all imported watch-only accounts against the
+	/// configured chain source.
+	pub fn sync_watchonly_accounts(&self) -> Result<(), Error> {
+		if !*self.is_running.read().unwrap() {
+			return Err(Error::NotRunning);
+		}
+
+		let chain_source = Arc::clone(&self.chain_source);
+		let wallets: Vec<Arc<WatchOnlyWallet>> =
+			self.watchonly_wallets.lock().unwrap().values().cloned().collect();
+
+		self.runtime.block_on(async move {
+			for wallet in wallets {
+				chain_source.sync_watchonly_wallet(wallet).await?;
+			}
 			Ok(())
 		})
 	}

@@ -31,7 +31,7 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	QrPaymentResult,
 };
-use ldk_node::{Builder, Event, NodeError};
+use ldk_node::{AccountId, Builder, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
@@ -109,6 +109,219 @@ async fn channel_full_cycle_legacy_staticremotekey() {
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
 	do_channel_full_cycle(node_a, node_b, &bitcoind.client, &electrsd.client, false, false, false)
 		.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn watchonly_account_syncs_balance() {
+	// A BIP84 account xpub 
+	const EXTERNAL_DESCRIPTOR: &str = "wpkh([2de67592/84'/1'/0']tpubDCUJWjpCfXoCzDwWiHRwsALSWYSMXvHHzQ3q4CoiVgWAHcrvL2C89PUs1wC2QddbaDEvLNaL5PFVFdYm5oBf7DXZWoFK8X4PLXAUA8L9zsV/0/*)";
+	const INTERNAL_DESCRIPTOR: &str = "wpkh([2de67592/84'/1'/0']tpubDCUJWjpCfXoCzDwWiHRwsALSWYSMXvHHzQ3q4CoiVgWAHcrvL2C89PUs1wC2QddbaDEvLNaL5PFVFdYm5oBf7DXZWoFK8X4PLXAUA8L9zsV/1/*)";
+
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let config = random_config(false);
+
+	// Share one store across both builds (as in `start_stop_reinit`): recreating
+	// the TestSyncStore would reset its in-memory consistency-check backend.
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let test_sync_store = TestSyncStore::new(config.node_config.storage_dir_path.clone().into());
+	let sync_config = EsploraSyncConfig { background_sync_config: None };
+
+	setup_builder!(builder, config.node_config);
+	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let node =
+		builder.build_with_store(config.node_entropy.into(), test_sync_store.clone()).unwrap();
+	node.start().unwrap();
+
+	assert!(node.list_watchonly_accounts().is_empty());
+
+	let account_id = AccountId("watchonly-test".to_string());
+	node.import_watchonly_account(
+		account_id.clone(),
+		EXTERNAL_DESCRIPTOR.to_string(),
+		INTERNAL_DESCRIPTOR.to_string(),
+	)
+	.unwrap();
+
+	assert_eq!(node.list_watchonly_accounts(), vec![account_id.clone()]);
+
+	// Fresh account: an address can be derived, but it holds nothing yet.
+	let addr = node.watchonly_new_address(&account_id).unwrap();
+	assert_eq!(node.watchonly_balance(&account_id).unwrap(), 0);
+	assert!(node.watchonly_list_utxos(&account_id).unwrap().is_empty());
+
+	// Previewing the same descriptors derives the same address the account
+	// hands out, without importing or persisting anything.
+	let preview = node
+		.preview_watchonly_account(
+			EXTERNAL_DESCRIPTOR.to_string(),
+			INTERNAL_DESCRIPTOR.to_string(),
+			3,
+		)
+		.unwrap();
+	assert_eq!(preview.external_addresses.len(), 3);
+	assert_eq!(preview.external_addresses[0], addr);
+
+	// Fund the derived address on regtest and confirm it.
+	let amount_sat = 100_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr.clone()],
+		Amount::from_sat(amount_sat),
+	)
+	.await;
+
+	// Syncing against Esplora should now discover the funding output.
+	node.sync_watchonly_accounts().unwrap();
+
+	assert_eq!(node.watchonly_balance(&account_id).unwrap(), amount_sat);
+	assert_eq!(node.watchonly_list_utxos(&account_id).unwrap().len(), 1);
+
+	// Restart: rebuild the node from the same storage. The account must be
+	// reloaded from persistence, with balance and sync state intact, before
+	// any re-import or re-sync happens.
+	node.stop().unwrap();
+	drop(node);
+
+	setup_builder!(builder, config.node_config);
+	builder.set_chain_source_esplora(esplora_url, Some(sync_config));
+	let node = builder.build_with_store(config.node_entropy.into(), test_sync_store).unwrap();
+	node.start().unwrap();
+
+	assert_eq!(node.list_watchonly_accounts(), vec![account_id.clone()]);
+	assert_eq!(node.watchonly_balance(&account_id).unwrap(), amount_sat);
+	assert_eq!(node.watchonly_list_utxos(&account_id).unwrap().len(), 1);
+	assert_eq!(node.watchonly_list_addresses(&account_id).unwrap(), vec![addr.clone()]);
+
+	// Address derivation must continue where it left off, not reuse the funded address.
+	let next_addr = node.watchonly_new_address(&account_id).unwrap();
+	assert_ne!(next_addr, addr);
+
+	node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[allow(deprecated)]
+async fn watchonly_account_spends_via_signed_psbt() {
+	use bdk_wallet::descriptor::IntoWalletDescriptor;
+	use bdk_wallet::template::Bip84;
+	use bdk_wallet::{KeychainKind, SignOptions, Wallet as BdkWallet};
+	use bitcoin::bip32::Xpriv;
+	use bitcoin::key::Secp256k1;
+	use bitcoin::psbt::Psbt;
+	use bitcoin::{FeeRate, Network};
+	use electrsd::electrum_client::ElectrumApi;
+	use rand::{rng, Rng};
+
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let config = random_config(false);
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let sync_config = EsploraSyncConfig { background_sync_config: None };
+
+	setup_builder!(builder, config.node_config);
+	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let node = builder.build(config.node_entropy.into()).unwrap();
+	node.start().unwrap();
+
+	// Derive a BIP84 account from a fresh master key, producing matching public
+	// descriptors (imported as the watch-only account) and private descriptors
+	// (used below to sign, standing in for a hardware device).
+	let secp = Secp256k1::new();
+	let seed: [u8; 32] = rng().random();
+	let xprv = Xpriv::new_master(Network::Regtest, &seed).unwrap();
+
+	let (external_desc, external_keymap) =
+		Bip84(xprv, KeychainKind::External).into_wallet_descriptor(&secp, Network::Regtest).unwrap();
+	let (internal_desc, internal_keymap) =
+		Bip84(xprv, KeychainKind::Internal).into_wallet_descriptor(&secp, Network::Regtest).unwrap();
+	let external_public = external_desc.to_string();
+	let internal_public = internal_desc.to_string();
+	let external_private = external_desc.to_string_with_secret(&external_keymap);
+	let internal_private = internal_desc.to_string_with_secret(&internal_keymap);
+
+	let account_id = AccountId("watchonly-spend".to_string());
+	node.import_watchonly_account(account_id.clone(), external_public, internal_public).unwrap();
+
+	// Fund the account's first address, confirm, and sync it into view.
+	let fund_addr = node.watchonly_new_address(&account_id).unwrap();
+	let fund_amount_sat = 100_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![fund_addr.clone()],
+		Amount::from_sat(fund_amount_sat),
+	)
+	.await;
+	node.sync_watchonly_accounts().unwrap();
+	assert_eq!(node.watchonly_balance(&account_id).unwrap(), fund_amount_sat);
+
+	// Build the unsigned PSBT that spends from the account to an external
+	// address. The recipient is derived from an independent master key so it does
+	// not collide with the account's own descriptors.
+	let recipient_seed: [u8; 32] = rng().random();
+	let recipient_xprv = Xpriv::new_master(Network::Regtest, &recipient_seed).unwrap();
+	let recipient_wallet = BdkWallet::create(
+		Bip84(recipient_xprv, KeychainKind::External),
+		Bip84(recipient_xprv, KeychainKind::Internal),
+	)
+	.network(Network::Regtest)
+	.create_wallet_no_persist()
+	.unwrap();
+	let recipient_addr = recipient_wallet.peek_address(KeychainKind::External, 0).address;
+	let send_amount_sat = 40_000;
+	let fee_rate = FeeRate::from_sat_per_vb(2).unwrap();
+	let psbt_base64 = node
+		.watchonly_create_psbt(
+			&account_id,
+			vec![ldk_node::PsbtRecipient {
+				address: recipient_addr.clone(),
+				amount_sats: send_amount_sat,
+			}],
+			vec![],
+			fee_rate,
+		)
+		.unwrap();
+
+	// Sign the PSBT with a wallet built from the private descriptors, mirroring
+	// the external (hardware) signer. The PSBT already carries the previous
+	// transactions and key derivations, so no chain sync of the signer is needed.
+	let signing_wallet = BdkWallet::create(external_private, internal_private)
+		.network(Network::Regtest)
+		.create_wallet_no_persist()
+		.unwrap();
+	let mut psbt = Psbt::from_str(&psbt_base64).unwrap();
+	let finalized = signing_wallet.sign(&mut psbt, SignOptions::default()).unwrap();
+	assert!(finalized, "watch-only PSBT should be fully signed by the account's keys");
+
+	// The signed transaction must pay the recipient the requested amount.
+	let signed_tx = psbt.extract_tx().unwrap();
+	let paid_to_recipient = signed_tx
+		.output
+		.iter()
+		.any(|o| o.script_pubkey == recipient_addr.script_pubkey()
+			&& o.value == Amount::from_sat(send_amount_sat));
+	assert!(paid_to_recipient, "signed tx must pay the recipient the requested amount");
+
+	// Finalize, broadcast, and confirm the spend.
+	let txid = signed_tx.compute_txid();
+	electrsd.client.transaction_broadcast(&signed_tx).unwrap();
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	wait_for_tx(&electrsd.client, txid).await;
+
+	// After the spend confirms, the account balance drops by at least the amount
+	// sent (plus fee), and the change returns to the account.
+	node.sync_watchonly_accounts().unwrap();
+	let remaining = node.watchonly_balance(&account_id).unwrap();
+	assert!(
+		remaining < fund_amount_sat - send_amount_sat,
+		"account balance should reflect the spend: remaining={} funded={} sent={}",
+		remaining,
+		fund_amount_sat,
+		send_amount_sat
+	);
+	assert!(remaining > 0, "change should return to the account");
+
+	node.stop().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -231,7 +444,7 @@ async fn multi_hop_sending() {
 		.bolt11_payment()
 		.receive(2_500_000, &invoice_description.clone().into(), 9217)
 		.unwrap();
-	nodes[0].bolt11_payment().send(&invoice, Some(route_params)).unwrap();
+	nodes[0].bolt11_payment().send(&invoice, Some(route_params), None).unwrap();
 
 	expect_event!(nodes[1], PaymentForwarded);
 
@@ -990,7 +1203,7 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 		Err(NodeError::ChannelSplicingFailed),
 	);
 	assert_eq!(
-		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None),
+		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None, None),
 		Err(NodeError::PaymentSendingFailed)
 	);
 
@@ -1022,7 +1235,7 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 4_000_000);
 
 	let payment_id =
-		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None).unwrap();
+		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None, None).unwrap();
 
 	expect_payment_successful_event!(node_b, Some(payment_id), None);
 	expect_payment_received_event!(node_a, amount_msat);
@@ -1116,7 +1329,7 @@ async fn simple_bolt12_send_receive() {
 	let expected_payer_note = Some("Test".to_string());
 	let payment_id = node_a
 		.bolt12_payment()
-		.send(&offer, expected_quantity, expected_payer_note.clone(), None)
+		.send(&offer, expected_quantity, expected_payer_note.clone(), None, None)
 		.unwrap();
 
 	expect_payment_successful_event!(node_a, Some(payment_id), None);
@@ -1172,7 +1385,7 @@ async fn simple_bolt12_send_receive() {
 	let expected_payer_note = Some("Test".to_string());
 	assert!(node_a
 		.bolt12_payment()
-		.send_using_amount(&offer, less_than_offer_amount, None, None, None)
+		.send_using_amount(&offer, less_than_offer_amount, None, None, None, None)
 		.is_err());
 	let payment_id = node_a
 		.bolt12_payment()
@@ -1181,6 +1394,7 @@ async fn simple_bolt12_send_receive() {
 			expected_amount_msat,
 			expected_quantity,
 			expected_payer_note.clone(),
+			None,
 			None,
 		)
 		.unwrap();
@@ -1244,6 +1458,7 @@ async fn simple_bolt12_send_receive() {
 			3600,
 			expected_quantity,
 			expected_payer_note.clone(),
+			None,
 			None,
 		)
 		.unwrap();
@@ -1428,7 +1643,7 @@ async fn async_payment() {
 	node_receiver.stop().unwrap();
 
 	let payment_id =
-		node_sender.bolt12_payment().send_using_amount(&offer, 5_000, None, None, None).unwrap();
+		node_sender.bolt12_payment().send_using_amount(&offer, 5_000, None, None, None, None).unwrap();
 
 	// Sleep to allow the payment reach a state where the htlc is held and waiting for the receiver to come online.
 	tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
@@ -1626,7 +1841,7 @@ async fn unified_qr_send_receive() {
 
 	let uqr_payment = node_b.unified_qr_payment().receive(expected_amount_sats, "asdf", expiry_sec);
 	let uri_str = uqr_payment.clone().unwrap();
-	let offer_payment_id: PaymentId = match node_a.unified_qr_payment().send(&uri_str, None) {
+	let offer_payment_id: PaymentId = match node_a.unified_qr_payment().send(&uri_str, None, None) {
 		Ok(QrPaymentResult::Bolt12 { payment_id }) => {
 			println!("\nBolt12 payment sent successfully with PaymentID: {:?}", payment_id);
 			payment_id
@@ -1647,7 +1862,7 @@ async fn unified_qr_send_receive() {
 	// Cut off the BOLT12 part to fallback to BOLT11.
 	let uri_str_without_offer = uri_str.split("&lno=").next().unwrap();
 	let invoice_payment_id: PaymentId =
-		match node_a.unified_qr_payment().send(uri_str_without_offer, None) {
+		match node_a.unified_qr_payment().send(uri_str_without_offer, None, None) {
 			Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
 				panic!("Expected Bolt11 payment but got Bolt12");
 			},
@@ -1670,7 +1885,7 @@ async fn unified_qr_send_receive() {
 
 	// Cut off any lightning part to fallback to on-chain only.
 	let uri_str_without_lightning = onchain_uqr_payment.split("&lightning=").next().unwrap();
-	let txid = match node_a.unified_qr_payment().send(&uri_str_without_lightning, None) {
+	let txid = match node_a.unified_qr_payment().send(&uri_str_without_lightning, None, None) {
 		Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
 			panic!("Expected on-chain payment but got Bolt12")
 		},
@@ -1786,7 +2001,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None, None).unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_event!(service_node, PaymentForwarded);
@@ -1823,7 +2038,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	// Have the payer_node pay the invoice, to check regular forwards service_node -> client_node
 	// are working as expected.
 	println!("Paying regular invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&invoice, None).unwrap();
+	let payment_id = payer_node.bolt11_payment().send(&invoice, None, None).unwrap();
 	expect_payment_successful_event!(payer_node, Some(payment_id), None);
 	expect_event!(service_node, PaymentForwarded);
 	expect_payment_received_event!(client_node, amount_msat);
@@ -1849,7 +2064,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None, None).unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_channel_pending_event!(client_node, service_node.node_id());
@@ -1902,7 +2117,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None, None).unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_channel_pending_event!(client_node, service_node.node_id());
@@ -1973,7 +2188,7 @@ async fn spontaneous_send_with_custom_preimage() {
 	let amount_msat = 100_000;
 	let payment_id = node_a
 		.spontaneous_payment()
-		.send_with_preimage(amount_msat, node_b.node_id(), custom_preimage, None)
+		.send_with_preimage(amount_msat, node_b.node_id(), custom_preimage, None, None)
 		.unwrap();
 
 	// check payment status and verify stored preimage
@@ -2110,7 +2325,7 @@ async fn lsps2_client_trusts_lsp() {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&res, None).unwrap();
+	let payment_id = payer_node.bolt11_payment().send(&res, None, None).unwrap();
 	println!("Payment ID: {:?}", payment_id);
 	let funding_txo = expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
@@ -2285,7 +2500,7 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let _payment_id = payer_node.bolt11_payment().send(&res, None).unwrap();
+	let _payment_id = payer_node.bolt11_payment().send(&res, None, None).unwrap();
 	let funding_txo = expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_channel_pending_event!(client_node, service_node.node_id());

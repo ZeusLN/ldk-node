@@ -83,6 +83,7 @@ winapi = { version = "0.3", features = ["winbase"] }
 
 [dev-dependencies]
 lightning = { git = "https://github.com/ZeusLN/rust-lightning", branch = "lsps7-for-ldk-node-close-fix", features = ["std", "_test_utils"] }
+bdk_wallet = { version = "2.2.0", default-features = false, features = ["std", "keys-bip39", "test-utils"] }
 proptest = "1.0.0"
 regex = "1.5.6"
 criterion = { version = "0.7.0", features = ["async_tokio"] }

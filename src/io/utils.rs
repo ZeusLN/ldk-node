@@ -45,6 +45,8 @@ use crate::io::{
 	CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE, NODE_METRICS_KEY,
 	NODE_METRICS_PRIMARY_NAMESPACE, NODE_METRICS_SECONDARY_NAMESPACE,
+	WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+	WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::logger::{log_error, LdkLogger, Logger};
 use crate::peer_store::PeerStore;
@@ -449,17 +451,16 @@ macro_rules! impl_read_write_change_set_type {
 		$write_name:ident,
 		$change_set_type:ty,
 		$primary_namespace:expr,
-		$secondary_namespace:expr,
 		$key:expr
 	) => {
 		pub(crate) fn $read_name<L: Deref>(
-			kv_store: Arc<DynStore>, logger: L,
+			kv_store: Arc<DynStore>, secondary_namespace: &str, logger: L,
 		) -> Result<Option<$change_set_type>, std::io::Error>
 		where
 			L::Target: LdkLogger,
 		{
 			let bytes =
-				match KVStoreSync::read(&*kv_store, $primary_namespace, $secondary_namespace, $key)
+				match KVStoreSync::read(&*kv_store, $primary_namespace, secondary_namespace, $key)
 				{
 					Ok(bytes) => bytes,
 					Err(e) => {
@@ -470,7 +471,7 @@ macro_rules! impl_read_write_change_set_type {
 								logger,
 								"Reading data from key {}/{}/{} failed due to: {}",
 								$primary_namespace,
-								$secondary_namespace,
+								secondary_namespace,
 								$key,
 								e
 							);
@@ -495,19 +496,19 @@ macro_rules! impl_read_write_change_set_type {
 		}
 
 		pub(crate) fn $write_name<L: Deref>(
-			value: &$change_set_type, kv_store: Arc<DynStore>, logger: L,
+			value: &$change_set_type, kv_store: Arc<DynStore>, secondary_namespace: &str, logger: L,
 		) -> Result<(), std::io::Error>
 		where
 			L::Target: LdkLogger,
 		{
 			let data = ChangeSetSerWrapper(value).encode();
-			KVStoreSync::write(&*kv_store, $primary_namespace, $secondary_namespace, $key, data)
+			KVStoreSync::write(&*kv_store, $primary_namespace, secondary_namespace, $key, data)
 				.map_err(|e| {
 					log_error!(
 						logger,
 						"Writing data to key {}/{}/{} failed due to: {}",
 						$primary_namespace,
-						$secondary_namespace,
+						secondary_namespace,
 						$key,
 						e
 					);
@@ -522,7 +523,6 @@ impl_read_write_change_set_type!(
 	write_bdk_wallet_descriptor,
 	Descriptor<DescriptorPublicKey>,
 	BDK_WALLET_DESCRIPTOR_PRIMARY_NAMESPACE,
-	BDK_WALLET_DESCRIPTOR_SECONDARY_NAMESPACE,
 	BDK_WALLET_DESCRIPTOR_KEY
 );
 
@@ -531,7 +531,6 @@ impl_read_write_change_set_type!(
 	write_bdk_wallet_change_descriptor,
 	Descriptor<DescriptorPublicKey>,
 	BDK_WALLET_CHANGE_DESCRIPTOR_PRIMARY_NAMESPACE,
-	BDK_WALLET_CHANGE_DESCRIPTOR_SECONDARY_NAMESPACE,
 	BDK_WALLET_CHANGE_DESCRIPTOR_KEY
 );
 
@@ -540,7 +539,6 @@ impl_read_write_change_set_type!(
 	write_bdk_wallet_network,
 	Network,
 	BDK_WALLET_NETWORK_PRIMARY_NAMESPACE,
-	BDK_WALLET_NETWORK_SECONDARY_NAMESPACE,
 	BDK_WALLET_NETWORK_KEY
 );
 
@@ -549,7 +547,6 @@ impl_read_write_change_set_type!(
 	write_bdk_wallet_local_chain,
 	BdkLocalChainChangeSet,
 	BDK_WALLET_LOCAL_CHAIN_PRIMARY_NAMESPACE,
-	BDK_WALLET_LOCAL_CHAIN_SECONDARY_NAMESPACE,
 	BDK_WALLET_LOCAL_CHAIN_KEY
 );
 
@@ -558,7 +555,6 @@ impl_read_write_change_set_type!(
 	write_bdk_wallet_tx_graph,
 	BdkTxGraphChangeSet<ConfirmationBlockTime>,
 	BDK_WALLET_TX_GRAPH_PRIMARY_NAMESPACE,
-	BDK_WALLET_TX_GRAPH_SECONDARY_NAMESPACE,
 	BDK_WALLET_TX_GRAPH_KEY
 );
 
@@ -567,19 +563,18 @@ impl_read_write_change_set_type!(
 	write_bdk_wallet_indexer,
 	BdkIndexerChangeSet,
 	BDK_WALLET_INDEXER_PRIMARY_NAMESPACE,
-	BDK_WALLET_INDEXER_SECONDARY_NAMESPACE,
 	BDK_WALLET_INDEXER_KEY
 );
 
 // Reads the full BdkWalletChangeSet or returns default fields
 pub(crate) fn read_bdk_wallet_change_set(
-	kv_store: Arc<DynStore>, logger: Arc<Logger>,
+	kv_store: Arc<DynStore>, secondary_namespace: &str, logger: Arc<Logger>,
 ) -> Result<Option<BdkWalletChangeSet>, std::io::Error> {
 	let mut change_set = BdkWalletChangeSet::default();
 
 	// We require a descriptor and return `None` to signal creation of a new wallet otherwise.
 	if let Some(descriptor) =
-		read_bdk_wallet_descriptor(Arc::clone(&kv_store), Arc::clone(&logger))?
+		read_bdk_wallet_descriptor(Arc::clone(&kv_store), secondary_namespace, Arc::clone(&logger))?
 	{
 		change_set.descriptor = Some(descriptor);
 	} else {
@@ -587,34 +582,148 @@ pub(crate) fn read_bdk_wallet_change_set(
 	}
 
 	// We require a change_descriptor and return `None` to signal creation of a new wallet otherwise.
-	if let Some(change_descriptor) =
-		read_bdk_wallet_change_descriptor(Arc::clone(&kv_store), Arc::clone(&logger))?
-	{
+	if let Some(change_descriptor) = read_bdk_wallet_change_descriptor(
+		Arc::clone(&kv_store),
+		secondary_namespace,
+		Arc::clone(&logger),
+	)? {
 		change_set.change_descriptor = Some(change_descriptor);
 	} else {
 		return Ok(None);
 	}
 
 	// We require a network and return `None` to signal creation of a new wallet otherwise.
-	if let Some(network) = read_bdk_wallet_network(Arc::clone(&kv_store), Arc::clone(&logger))? {
+	if let Some(network) =
+		read_bdk_wallet_network(Arc::clone(&kv_store), secondary_namespace, Arc::clone(&logger))?
+	{
 		change_set.network = Some(network);
 	} else {
 		return Ok(None);
 	}
 
-	read_bdk_wallet_local_chain(Arc::clone(&kv_store), Arc::clone(&logger))?
+	read_bdk_wallet_local_chain(Arc::clone(&kv_store), secondary_namespace, Arc::clone(&logger))?
 		.map(|local_chain| change_set.local_chain = local_chain);
-	read_bdk_wallet_tx_graph(Arc::clone(&kv_store), Arc::clone(&logger))?
+	read_bdk_wallet_tx_graph(Arc::clone(&kv_store), secondary_namespace, Arc::clone(&logger))?
 		.map(|tx_graph| change_set.tx_graph = tx_graph);
-	read_bdk_wallet_indexer(Arc::clone(&kv_store), Arc::clone(&logger))?
+	read_bdk_wallet_indexer(Arc::clone(&kv_store), secondary_namespace, Arc::clone(&logger))?
 		.map(|indexer| change_set.indexer = indexer);
 	Ok(Some(change_set))
 }
 
+/// Returns whether `account_id` is present in the persisted watch-only account index.
+pub(crate) fn watchonly_account_marker_exists<L: Deref>(
+	account_id: &str, kv_store: Arc<DynStore>, logger: L,
+) -> Result<bool, Error>
+where
+	L::Target: LdkLogger,
+{
+	match KVStoreSync::read(
+		&*kv_store,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+		account_id,
+	) {
+		Ok(_) => Ok(true),
+		Err(e) if e.kind() == lightning::io::ErrorKind::NotFound => Ok(false),
+		Err(e) => {
+			log_error!(
+				logger,
+				"Reading data from key {}/{}/{} failed due to: {}",
+				WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+				WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+				account_id,
+				e
+			);
+			Err(Error::PersistenceFailed)
+		},
+	}
+}
+
+/// Adds `account_id` to the persisted watch-only account index.
+pub(crate) fn write_watchonly_account_marker<L: Deref>(
+	account_id: &str, kv_store: Arc<DynStore>, logger: L,
+) -> Result<(), Error>
+where
+	L::Target: LdkLogger,
+{
+	KVStoreSync::write(
+		&*kv_store,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+		account_id,
+		Vec::new(),
+	)
+	.map_err(|e| {
+		log_error!(
+			logger,
+			"Writing data to key {}/{}/{} failed due to: {}",
+			WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+			WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+			account_id,
+			e
+		);
+		Error::PersistenceFailed
+	})
+}
+
+/// Lists the account ids in the persisted watch-only account index.
+pub(crate) fn list_watchonly_account_ids<L: Deref>(
+	kv_store: Arc<DynStore>, logger: L,
+) -> Result<Vec<String>, Error>
+where
+	L::Target: LdkLogger,
+{
+	KVStoreSync::list(
+		&*kv_store,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+	)
+	.map_err(|e| {
+		log_error!(
+			logger,
+			"Listing keys in {}/{} failed due to: {}",
+			WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+			WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+			e
+		);
+		Error::PersistenceFailed
+	})
+}
+
+/// Removes `account_id` from the persisted watch-only account index.
+pub(crate) fn remove_watchonly_account_marker<L: Deref>(
+	account_id: &str, kv_store: Arc<DynStore>, logger: L,
+) -> Result<(), Error>
+where
+	L::Target: LdkLogger,
+{
+	KVStoreSync::remove(
+		&*kv_store,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+		WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+		account_id,
+		false,
+	)
+	.map_err(|e| {
+		log_error!(
+			logger,
+			"Removing data at key {}/{}/{} failed due to: {}",
+			WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+			WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE,
+			account_id,
+			e
+		);
+		Error::PersistenceFailed
+	})
+}
+
 #[cfg(test)]
 mod tests {
-	use super::read_or_generate_seed_file;
-	use super::test_utils::random_storage_path;
+	use lightning::util::test_utils::TestLogger;
+
+	use super::test_utils::{random_storage_path, InMemoryStore};
+	use super::*;
+	use crate::types::DynStoreWrapper;
 
 	#[test]
 	fn generated_seed_is_readable() {
@@ -623,5 +732,30 @@ mod tests {
 		let expected_seed_bytes = read_or_generate_seed_file(&rand_path.to_str().unwrap()).unwrap();
 		let read_seed_bytes = read_or_generate_seed_file(&rand_path.to_str().unwrap()).unwrap();
 		assert_eq!(expected_seed_bytes, read_seed_bytes);
+	}
+
+	#[test]
+	fn watchonly_account_marker_roundtrip() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+
+		assert!(!watchonly_account_marker_exists("acct", Arc::clone(&store), Arc::clone(&logger))
+			.unwrap());
+
+		write_watchonly_account_marker("acct", Arc::clone(&store), Arc::clone(&logger)).unwrap();
+		assert!(watchonly_account_marker_exists("acct", Arc::clone(&store), Arc::clone(&logger))
+			.unwrap());
+		assert_eq!(
+			KVStoreSync::list(
+				&*store,
+				WATCHONLY_ACCOUNTS_PERSISTENCE_PRIMARY_NAMESPACE,
+				WATCHONLY_ACCOUNTS_PERSISTENCE_SECONDARY_NAMESPACE
+			)
+			.unwrap(),
+			vec!["acct".to_string()]
+		);
+
+		remove_watchonly_account_marker("acct", Arc::clone(&store), Arc::clone(&logger)).unwrap();
+		assert!(!watchonly_account_marker_exists("acct", store, logger).unwrap());
 	}
 }
