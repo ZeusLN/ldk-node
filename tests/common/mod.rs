@@ -10,10 +10,12 @@
 
 pub(crate) mod logging;
 
+use std::boxed::Box;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -421,7 +423,7 @@ pub(crate) fn setup_node_for_async_payments(
 
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
-			let kv_store = TestSyncStore::new(config.node_config.storage_dir_path.into());
+			let kv_store = Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.into()));
 			builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
 		},
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
@@ -818,8 +820,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		.unwrap();
 
 	println!("\nA send");
-	let payment_id = node_a.bolt11_payment().send(&invoice, None).unwrap();
-	assert_eq!(node_a.bolt11_payment().send(&invoice, None), Err(NodeError::DuplicatePayment));
+	let payment_id = node_a.bolt11_payment().send(&invoice, None, None).unwrap();
+	assert_eq!(node_a.bolt11_payment().send(&invoice, None, None), Err(NodeError::DuplicatePayment));
 
 	assert!(!node_a.list_payments_with_filter(|p| p.id == payment_id).is_empty());
 
@@ -855,7 +857,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	assert!(matches!(node_b.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
 
 	// Assert we fail duplicate outbound payments and check the status hasn't changed.
-	assert_eq!(Err(NodeError::DuplicatePayment), node_a.bolt11_payment().send(&invoice, None));
+	assert_eq!(Err(NodeError::DuplicatePayment), node_a.bolt11_payment().send(&invoice, None, None));
 	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
 	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
 	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
@@ -1289,7 +1291,6 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 }
 
 // A `KVStore` impl for testing purposes that wraps all our `KVStore`s and asserts their synchronicity.
-#[derive(Clone)]
 pub(crate) struct TestSyncStore {
 	inner: Arc<TestSyncStoreInner>,
 }
@@ -1304,7 +1305,7 @@ impl TestSyncStore {
 impl KVStore for TestSyncStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, io::Error>> + Send>> {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
@@ -1312,16 +1313,16 @@ impl KVStore for TestSyncStore {
 		let fut = tokio::task::spawn_blocking(move || {
 			inner.read_internal(&primary_namespace, &secondary_namespace, &key)
 		});
-		async move {
+		Box::pin(async move {
 			fut.await.unwrap_or_else(|e| {
 				let msg = format!("Failed to IO operation due join error: {}", e);
 				Err(io::Error::new(io::ErrorKind::Other, msg))
 			})
-		}
+		})
 	}
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
@@ -1329,16 +1330,16 @@ impl KVStore for TestSyncStore {
 		let fut = tokio::task::spawn_blocking(move || {
 			inner.write_internal(&primary_namespace, &secondary_namespace, &key, buf)
 		});
-		async move {
+		Box::pin(async move {
 			fut.await.unwrap_or_else(|e| {
 				let msg = format!("Failed to IO operation due join error: {}", e);
 				Err(io::Error::new(io::ErrorKind::Other, msg))
 			})
-		}
+		})
 	}
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
@@ -1346,28 +1347,28 @@ impl KVStore for TestSyncStore {
 		let fut = tokio::task::spawn_blocking(move || {
 			inner.remove_internal(&primary_namespace, &secondary_namespace, &key, lazy)
 		});
-		async move {
+		Box::pin(async move {
 			fut.await.unwrap_or_else(|e| {
 				let msg = format!("Failed to IO operation due join error: {}", e);
 				Err(io::Error::new(io::ErrorKind::Other, msg))
 			})
-		}
+		})
 	}
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + Send>> {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
 		let fut = tokio::task::spawn_blocking(move || {
 			inner.list_internal(&primary_namespace, &secondary_namespace)
 		});
-		async move {
+		Box::pin(async move {
 			fut.await.unwrap_or_else(|e| {
 				let msg = format!("Failed to IO operation due join error: {}", e);
 				Err(io::Error::new(io::ErrorKind::Other, msg))
 			})
-		}
+		})
 	}
 }
 

@@ -5,10 +5,12 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::boxed::Box;
 use std::collections::{hash_map, HashMap};
 use std::future::Future;
 use std::panic::RefUnwindSafe;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Mutex;
 
 use lightning::events::ClosureReason;
@@ -104,27 +106,27 @@ impl InMemoryStore {
 impl KVStore for InMemoryStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send>> {
 		let res = self.read_internal(&primary_namespace, &secondary_namespace, &key);
-		async move { res }
+		Box::pin(async move { res })
 	}
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'static + Send>> {
 		let res = self.write_internal(&primary_namespace, &secondary_namespace, &key, buf);
-		async move { res }
+		Box::pin(async move { res })
 	}
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'static + Send>> {
 		let res = self.remove_internal(&primary_namespace, &secondary_namespace, &key, lazy);
-		async move { res }
+		Box::pin(async move { res })
 	}
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + 'static + Send>> {
 		let res = self.list_internal(primary_namespace, secondary_namespace);
-		async move { res }
+		Box::pin(async move { res })
 	}
 }
 
@@ -329,6 +331,7 @@ pub(crate) fn do_test_store<K: KVStoreSync + Sync>(store_0: &K, store_1: &K) {
 		&nodes[0],
 		1,
 		ClosureReason::HolderForceClosed { broadcasted_latest_txn: Some(true), message },
+		false,
 		&[nodes[1].node.get_our_node_id()],
 		100000,
 	);
@@ -344,7 +347,7 @@ pub(crate) fn do_test_store<K: KVStoreSync + Sync>(store_0: &K, store_1: &K) {
 	check_closed_broadcast!(nodes[1], true);
 	let reason = ClosureReason::CommitmentTxConfirmed;
 	let node_id_0 = nodes[0].node.get_our_node_id();
-	check_closed_event(&nodes[1], 1, reason, &[node_id_0], 100000);
+	check_closed_event(&nodes[1], 1, reason, false, &[node_id_0], 100000);
 	check_added_monitors!(nodes[1], 1);
 
 	// Make sure everything is persisted as expected after close.

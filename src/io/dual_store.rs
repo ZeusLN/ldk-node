@@ -35,6 +35,7 @@
 //! 60-second timeout and does not block node startup.
 
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -516,29 +517,29 @@ impl KVStoreSync for DualStore {
 impl KVStore for DualStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, io::Error>> + Send>> {
 		let result = KVStoreSync::read(self, primary_namespace, secondary_namespace, key);
-		async move { result }
+		Box::pin(async move { result })
 	}
 
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
 		let result = KVStoreSync::write(self, primary_namespace, secondary_namespace, key, buf);
-		async move { result }
+		Box::pin(async move { result })
 	}
 
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
 		let result = KVStoreSync::remove(self, primary_namespace, secondary_namespace, key, lazy);
-		async move { result }
+		Box::pin(async move { result })
 	}
 
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + Send>> {
 		let result = KVStoreSync::list(self, primary_namespace, secondary_namespace);
-		async move { result }
+		Box::pin(async move { result })
 	}
 }

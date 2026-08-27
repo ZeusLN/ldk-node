@@ -6,10 +6,12 @@
 // accordance with one or both of these licenses.
 
 //! Objects related to [`SqliteStore`] live here.
+use std::boxed::Box;
 use std::collections::HashMap;
 use std::fs;
 use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -121,7 +123,7 @@ impl SqliteStore {
 impl KVStore for SqliteStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, io::Error>> + Send>> {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
@@ -129,17 +131,17 @@ impl KVStore for SqliteStore {
 		let fut = tokio::task::spawn_blocking(move || {
 			inner.read_internal(&primary_namespace, &secondary_namespace, &key)
 		});
-		async move {
+		Box::pin(async move {
 			fut.await.unwrap_or_else(|e| {
 				let msg = format!("Failed to IO operation due join error: {}", e);
 				Err(io::Error::new(io::ErrorKind::Other, msg))
 			})
-		}
+		})
 	}
 
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
 		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
 		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
 		let primary_namespace = primary_namespace.to_string();
@@ -157,17 +159,17 @@ impl KVStore for SqliteStore {
 				buf,
 			)
 		});
-		async move {
+		Box::pin(async move {
 			fut.await.unwrap_or_else(|e| {
 				let msg = format!("Failed to IO operation due join error: {}", e);
 				Err(io::Error::new(io::ErrorKind::Other, msg))
 			})
-		}
+		})
 	}
 
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
-	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
 		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
 		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
 		let primary_namespace = primary_namespace.to_string();
@@ -184,29 +186,29 @@ impl KVStore for SqliteStore {
 				&key,
 			)
 		});
-		async move {
+		Box::pin(async move {
 			fut.await.unwrap_or_else(|e| {
 				let msg = format!("Failed to IO operation due join error: {}", e);
 				Err(io::Error::new(io::ErrorKind::Other, msg))
 			})
-		}
+		})
 	}
 
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + Send>> {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
 		let fut = tokio::task::spawn_blocking(move || {
 			inner.list_internal(&primary_namespace, &secondary_namespace)
 		});
-		async move {
+		Box::pin(async move {
 			fut.await.unwrap_or_else(|e| {
 				let msg = format!("Failed to IO operation due join error: {}", e);
 				Err(io::Error::new(io::ErrorKind::Other, msg))
 			})
-		}
+		})
 	}
 }
 
