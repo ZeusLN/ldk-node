@@ -1890,17 +1890,17 @@ dependencies = [
  "esplora-client 0.12.3",
  "ldk-node 0.6.2",
  "libc",
- "lightning 0.3.0+git",
- "lightning-background-processor 0.2.0+git",
- "lightning-block-sync 0.2.0+git",
- "lightning-invoice 0.34.0+git",
- "lightning-liquidity 0.2.0+git",
- "lightning-macros 0.2.0+git",
- "lightning-net-tokio 0.2.0+git",
- "lightning-persister 0.2.0+git",
- "lightning-rapid-gossip-sync 0.2.0+git",
- "lightning-transaction-sync 0.2.0+git",
- "lightning-types 0.3.0+git",
+ "lightning 0.2.5",
+ "lightning-background-processor 0.2.3",
+ "lightning-block-sync 0.2.0",
+ "lightning-invoice 0.34.1",
+ "lightning-liquidity 0.2.3",
+ "lightning-macros 0.2.1",
+ "lightning-net-tokio 0.2.0",
+ "lightning-persister 0.2.3",
+ "lightning-rapid-gossip-sync 0.2.3",
+ "lightning-transaction-sync 0.2.1",
+ "lightning-types 0.3.5",
  "lnd_grpc_rust",
  "log",
  "proptest",
@@ -1971,24 +1971,24 @@ dependencies = [
  "libm",
  "lightning-invoice 0.33.2",
  "lightning-types 0.2.0",
- "possiblyrandom 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "possiblyrandom 0.2.0",
 ]
 
 [[package]]
 name = "lightning"
-version = "0.3.0+git"
-source = "git+https://github.com/ZeusLN/rust-lightning?branch=lsps7-for-ldk-node-close-fix#a7fa715285f940e25f721516371eac59956ccf32"
+version = "0.2.5"
+source = "git+https://github.com/ZeusLN/rust-lightning?branch=zeus-0.2#24130051a9766467bbfece5ef909e2aa3729c985"
 dependencies = [
  "bech32",
  "bitcoin",
  "dnssec-prover",
  "hashbrown 0.13.2",
  "libm",
- "lightning-invoice 0.34.0+git",
- "lightning-macros 0.2.0+git",
- "lightning-types 0.3.0+git",
+ "lightning-invoice 0.34.1",
+ "lightning-macros 0.2.1",
+ "lightning-types 0.3.5",
  "musig2",
- "possiblyrandom 0.2.0 (git+https://github.com/ZeusLN/rust-lightning?branch=lsps7-for-ldk-node-close-fix)",
+ "possiblyrandom 0.2.1",
  "regex",
 ]
 
@@ -2007,16 +2007,16 @@ dependencies = [
 
 [[package]]
 name = "lightning-background-processor"
-version = "0.2.0+git"
-source = "git+https://github.com/ZeusLN/rust-lightning?branch=lsps7-for-ldk-node-close-fix#a7fa715285f940e25f721516371eac59956ccf32"
+version = "0.2.3"
+source = "git+https://github.com/ZeusLN/rust-lightning?branch=zeus-0.2#24130051a9766467bbfece5ef909e2aa3729c985"
 dependencies = [
  "bitcoin",
  "bitcoin-io",
  "bitcoin_hashes",
- "lightning 0.3.0+git",
- "lightning-liquidity 0.2.0+git",
- "lightning-rapid-gossip-sync 0.2.0+git",
- "possiblyrandom 0.2.0 (git+https://github.com/ZeusLN/rust-lightning?branch=lsps7-for-ldk-node-close-fix)",
+ "lightning 0.2.5",
+ "lightning-liquidity 0.2.3",
+ "lightning-rapid-gossip-sync 0.2.3",
+ "possiblyrandom 0.2.1",
 ]
 
 [[package]]
@@ -2034,12 +2034,12 @@ dependencies = [
 
 [[package]]
 name = "lightning-block-sync"
-version = "0.2.0+git"
-source = "git+https://github.com/ZeusLN/rust-lightning?branch=lsps7-for-ldk-node-close-fix#a7fa715285f940e25f721516371eac59956ccf32"
+version = "0.2.0"
+source = "git+https://github.com/ZeusLN/rust-lightning?branch=zeus-0.2#24130051a9766467bbfece5ef909e2aa3729c985"
 dependencies = [
  "bitcoin",
  "chunked_transfer",
- "lightning 0.3.0+git",
+ "lightning 0.2.5",
  "serde_json",
  "tokio",
 ]
@@ -2058,12 +2058,12 @@ dependencies = [
 
 [[package]]
 name = "lightning-invoice"
-version = "0.34.0+git"
-source = "git+https://github.com/ZeusLN/rust-lightning?branch=lsps7-for-ldk-node-close-fix#a7fa715285f940e25f721516371eac59956ccf32"
+version = "0.34.1"
+source = "git+https://github.com/ZeusLN/rust-lightning?branch=zeus-0.2#24130051a9766467bbfece5ef909e2aa3729c985"
 dependencies = [
  "bech32",
  "bitcoin",
- "lightning-types 0.3.0+git",
+ "lightning-types 0.3.5",
  "serde",
 ]
 
@@ -2084,15 +2084,15 @@ dependencies = [
 
 [[package]]
 name = "lightning-liquidity"
-version = "0.2.0+git"
-source = "git+https://github.com/ZeusLN/rust-lightning?branch=lsps7-for-ldk-node-close-fix#a7fa715285f940e25f721516371eac59956ccf32"
+version = "0.2.3"
+source = "git+https://github.com/ZeusLN/rust-lightning?branch=zeus-0.2#24130051a9766467bbfece5ef909e2aa3729c985"
 dependencies = [
  "bitcoin",
  "chrono",
- "lightning 0.3.0+git",
- "lightning-invoice 0.34.0+git",
- "lightning-macros 0.2.0+git",
- "lightning-types 0.3.0+git",
+ "lightning 0.2.5",
+ "lightning-invoice 0.34.1",
+ "lightning-macros 0.2.1",
+ "lightning-types 0.3.5",
  "serde",
  "serde_json",
 ]
@@ -2110,8 +2110,8 @@ dependencies = [
 
 [[package]]
 name = "lightning-macros"
-version = "0.2.0+git"
-source = "git+https://github.com/ZeusLN/rust-lightning?branch=lsps7-for-ldk-node-close-fix#a7fa715285f940e25f721516371eac59956ccf32"
+version = "0.2.1"
+source = "git+https://github.com/ZeusLN/rust-lightning?branch=zeus-0.2#24130051a9766467bbfece5ef909e2aa3729c985"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2131,11 +2131,11 @@ dependencies = [
 
 [[package]]
 name = "lightning-net-tokio"
-version = "0.2.0+git"
-source = "git+https://github.com/ZeusLN/rust-lightning?branch=lsps7-for-ldk-node-close-fix#a7fa715285f940e25f721516371eac59956ccf32"
+version = "0.2.0"
+source = "git+https://github.com/ZeusLN/rust-lightning?branch=zeus-0.2#24130051a9766467bbfece5ef909e2aa3729c985"
 dependencies = [
  "bitcoin",
- "lightning 0.3.0+git",
+ "lightning 0.2.5",
  "tokio",
 ]
 
@@ -2152,11 +2152,11 @@ dependencies = [
 
 [[package]]
 name = "lightning-persister"
-version = "0.2.0+git"
-source = "git+https://github.com/ZeusLN/rust-lightning?branch=lsps7-for-ldk-node-close-fix#a7fa715285f940e25f721516371eac59956ccf32"
+version = "0.2.3"
+source = "git+https://github.com/ZeusLN/rust-lightning?branch=zeus-0.2#24130051a9766467bbfece5ef909e2aa3729c985"
 dependencies = [
  "bitcoin",
- "lightning 0.3.0+git",
+ "lightning 0.2.5",
  "tokio",
  "windows-sys 0.48.0",
 ]
@@ -2175,13 +2175,13 @@ dependencies = [
 
 [[package]]
 name = "lightning-rapid-gossip-sync"
-version = "0.2.0+git"
-source = "git+https://github.com/ZeusLN/rust-lightning?branch=lsps7-for-ldk-node-close-fix#a7fa715285f940e25f721516371eac59956ccf32"
+version = "0.2.3"
+source = "git+https://github.com/ZeusLN/rust-lightning?branch=zeus-0.2#24130051a9766467bbfece5ef909e2aa3729c985"
 dependencies = [
  "bitcoin",
  "bitcoin-io",
  "bitcoin_hashes",
- "lightning 0.3.0+git",
+ "lightning 0.2.5",
 ]
 
 [[package]]
@@ -2200,15 +2200,15 @@ dependencies = [
 
 [[package]]
 name = "lightning-transaction-sync"
-version = "0.2.0+git"
-source = "git+https://github.com/ZeusLN/rust-lightning?branch=lsps7-for-ldk-node-close-fix#a7fa715285f940e25f721516371eac59956ccf32"
+version = "0.2.1"
+source = "git+https://github.com/ZeusLN/rust-lightning?branch=zeus-0.2#24130051a9766467bbfece5ef909e2aa3729c985"
 dependencies = [
  "bitcoin",
  "electrum-client 0.24.1",
  "esplora-client 0.12.3",
  "futures",
- "lightning 0.3.0+git",
- "lightning-macros 0.2.0+git",
+ "lightning 0.2.5",
+ "lightning-macros 0.2.1",
 ]
 
 [[package]]
@@ -2222,8 +2222,8 @@ dependencies = [
 
 [[package]]
 name = "lightning-types"
-version = "0.3.0+git"
-source = "git+https://github.com/ZeusLN/rust-lightning?branch=lsps7-for-ldk-node-close-fix#a7fa715285f940e25f721516371eac59956ccf32"
+version = "0.3.5"
+source = "git+https://github.com/ZeusLN/rust-lightning?branch=zeus-0.2#24130051a9766467bbfece5ef909e2aa3729c985"
 dependencies = [
  "bitcoin",
 ]
@@ -2650,8 +2650,8 @@ dependencies = [
 
 [[package]]
 name = "possiblyrandom"
-version = "0.2.0"
-source = "git+https://github.com/ZeusLN/rust-lightning?branch=lsps7-for-ldk-node-close-fix#a7fa715285f940e25f721516371eac59956ccf32"
+version = "0.2.1"
+source = "git+https://github.com/ZeusLN/rust-lightning?branch=zeus-0.2#24130051a9766467bbfece5ef909e2aa3729c985"
 dependencies = [
  "getrandom 0.2.17",
 ]
