@@ -13,6 +13,7 @@ use std::fmt;
 use std::future::Future;
 #[cfg(test)]
 use std::panic::RefUnwindSafe;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -278,27 +279,27 @@ impl KVStoreSync for VssStore {
 impl KVStore for VssStore {
 	fn read(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, io::Error>> + Send>> {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
-		async move {
+		Box::pin(async move {
 			inner
 				.read_internal(&inner.async_client, primary_namespace, secondary_namespace, key)
 				.await
-		}
+		})
 	}
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
 		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
 		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
-		async move {
+		Box::pin(async move {
 			inner
 				.write_internal(
 					&inner.async_client,
@@ -311,11 +312,11 @@ impl KVStore for VssStore {
 					buf,
 				)
 				.await
-		}
+		})
 	}
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> {
 		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
 		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
 		let primary_namespace = primary_namespace.to_string();
@@ -335,24 +336,22 @@ impl KVStore for VssStore {
 				)
 				.await
 		};
-		async move {
-			if lazy {
-				tokio::task::spawn(async move { fut.await });
-				Ok(())
-			} else {
-				fut.await
-			}
+		if lazy {
+			tokio::task::spawn(async { fut.await });
+			Box::pin(async { Ok(()) })
+		} else {
+			Box::pin(async { fut.await })
 		}
 	}
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + Send>> {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
-		async move {
+		Box::pin(async move {
 			inner.list_internal(&inner.async_client, primary_namespace, secondary_namespace).await
-		}
+		})
 	}
 }
 
