@@ -40,6 +40,7 @@ fn spawn_payment(node_a: Arc<Node>, node_b: Arc<Node>, amount_msat: u64) {
 				node_b.node_id(),
 				preimage,
 				None,
+				None,
 			);
 
 			match payment_id {
@@ -108,6 +109,7 @@ async fn send_payments(node_a: Arc<Node>, node_b: Arc<Node>) -> std::time::Durat
 			amount_msat * total_payments,
 			node_a.node_id(),
 			PaymentPreimage(preimage_bytes),
+			None,
 			None,
 		)
 		.ok()
