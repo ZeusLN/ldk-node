@@ -31,7 +31,7 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	QrPaymentResult,
 };
-use ldk_node::{Builder, Event, NodeError};
+use ldk_node::{Builder, DynStore, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
@@ -231,7 +231,7 @@ async fn multi_hop_sending() {
 		.bolt11_payment()
 		.receive(2_500_000, &invoice_description.clone().into(), 9217)
 		.unwrap();
-	nodes[0].bolt11_payment().send(&invoice, Some(route_params)).unwrap();
+	nodes[0].bolt11_payment().send(&invoice, Some(route_params), None).unwrap();
 
 	expect_event!(nodes[1], PaymentForwarded);
 
@@ -252,14 +252,15 @@ async fn start_stop_reinit() {
 
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
-	let test_sync_store = TestSyncStore::new(config.node_config.storage_dir_path.clone().into());
+	let test_sync_store: Arc<DynStore> =
+		Arc::new(TestSyncStore::new(config.node_config.storage_dir_path.clone().into()));
 
 	let sync_config = EsploraSyncConfig { background_sync_config: None };
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
 	let node =
-		builder.build_with_store(config.node_entropy.into(), test_sync_store.clone()).unwrap();
+		builder.build_with_store(config.node_entropy.into(), Arc::clone(&test_sync_store)).unwrap();
 	node.start().unwrap();
 
 	let expected_node_id = node.node_id();
@@ -298,7 +299,7 @@ async fn start_stop_reinit() {
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
 	let reinitialized_node =
-		builder.build_with_store(config.node_entropy.into(), test_sync_store).unwrap();
+		builder.build_with_store(config.node_entropy.into(), Arc::clone(&test_sync_store)).unwrap();
 	reinitialized_node.start().unwrap();
 	assert_eq!(reinitialized_node.node_id(), expected_node_id);
 
@@ -990,7 +991,7 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 		Err(NodeError::ChannelSplicingFailed),
 	);
 	assert_eq!(
-		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None),
+		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None, None),
 		Err(NodeError::PaymentSendingFailed)
 	);
 
@@ -1022,7 +1023,7 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 4_000_000);
 
 	let payment_id =
-		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None).unwrap();
+		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None, None).unwrap();
 
 	expect_payment_successful_event!(node_b, Some(payment_id), None);
 	expect_payment_received_event!(node_a, amount_msat);
@@ -1116,7 +1117,7 @@ async fn simple_bolt12_send_receive() {
 	let expected_payer_note = Some("Test".to_string());
 	let payment_id = node_a
 		.bolt12_payment()
-		.send(&offer, expected_quantity, expected_payer_note.clone(), None)
+		.send(&offer, expected_quantity, expected_payer_note.clone(), None, None)
 		.unwrap();
 
 	expect_payment_successful_event!(node_a, Some(payment_id), None);
@@ -1172,7 +1173,7 @@ async fn simple_bolt12_send_receive() {
 	let expected_payer_note = Some("Test".to_string());
 	assert!(node_a
 		.bolt12_payment()
-		.send_using_amount(&offer, less_than_offer_amount, None, None, None)
+		.send_using_amount(&offer, less_than_offer_amount, None, None, None, None)
 		.is_err());
 	let payment_id = node_a
 		.bolt12_payment()
@@ -1181,6 +1182,7 @@ async fn simple_bolt12_send_receive() {
 			expected_amount_msat,
 			expected_quantity,
 			expected_payer_note.clone(),
+			None,
 			None,
 		)
 		.unwrap();
@@ -1244,6 +1246,7 @@ async fn simple_bolt12_send_receive() {
 			3600,
 			expected_quantity,
 			expected_payer_note.clone(),
+			None,
 			None,
 		)
 		.unwrap();
@@ -1428,7 +1431,7 @@ async fn async_payment() {
 	node_receiver.stop().unwrap();
 
 	let payment_id =
-		node_sender.bolt12_payment().send_using_amount(&offer, 5_000, None, None, None).unwrap();
+		node_sender.bolt12_payment().send_using_amount(&offer, 5_000, None, None, None, None).unwrap();
 
 	// Sleep to allow the payment reach a state where the htlc is held and waiting for the receiver to come online.
 	tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
@@ -1626,7 +1629,7 @@ async fn unified_qr_send_receive() {
 
 	let uqr_payment = node_b.unified_qr_payment().receive(expected_amount_sats, "asdf", expiry_sec);
 	let uri_str = uqr_payment.clone().unwrap();
-	let offer_payment_id: PaymentId = match node_a.unified_qr_payment().send(&uri_str, None) {
+	let offer_payment_id: PaymentId = match node_a.unified_qr_payment().send(&uri_str, None, None) {
 		Ok(QrPaymentResult::Bolt12 { payment_id }) => {
 			println!("\nBolt12 payment sent successfully with PaymentID: {:?}", payment_id);
 			payment_id
@@ -1647,7 +1650,7 @@ async fn unified_qr_send_receive() {
 	// Cut off the BOLT12 part to fallback to BOLT11.
 	let uri_str_without_offer = uri_str.split("&lno=").next().unwrap();
 	let invoice_payment_id: PaymentId =
-		match node_a.unified_qr_payment().send(uri_str_without_offer, None) {
+		match node_a.unified_qr_payment().send(uri_str_without_offer, None, None) {
 			Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
 				panic!("Expected Bolt11 payment but got Bolt12");
 			},
@@ -1670,7 +1673,7 @@ async fn unified_qr_send_receive() {
 
 	// Cut off any lightning part to fallback to on-chain only.
 	let uri_str_without_lightning = onchain_uqr_payment.split("&lightning=").next().unwrap();
-	let txid = match node_a.unified_qr_payment().send(&uri_str_without_lightning, None) {
+	let txid = match node_a.unified_qr_payment().send(&uri_str_without_lightning, None, None) {
 		Ok(QrPaymentResult::Bolt12 { payment_id: _ }) => {
 			panic!("Expected on-chain payment but got Bolt12")
 		},
@@ -1786,7 +1789,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None, None).unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_event!(service_node, PaymentForwarded);
@@ -1823,7 +1826,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	// Have the payer_node pay the invoice, to check regular forwards service_node -> client_node
 	// are working as expected.
 	println!("Paying regular invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&invoice, None).unwrap();
+	let payment_id = payer_node.bolt11_payment().send(&invoice, None, None).unwrap();
 	expect_payment_successful_event!(payer_node, Some(payment_id), None);
 	expect_event!(service_node, PaymentForwarded);
 	expect_payment_received_event!(client_node, amount_msat);
@@ -1849,7 +1852,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None, None).unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_channel_pending_event!(client_node, service_node.node_id());
@@ -1902,7 +1905,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None, None).unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_channel_pending_event!(client_node, service_node.node_id());
@@ -1973,7 +1976,7 @@ async fn spontaneous_send_with_custom_preimage() {
 	let amount_msat = 100_000;
 	let payment_id = node_a
 		.spontaneous_payment()
-		.send_with_preimage(amount_msat, node_b.node_id(), custom_preimage, None)
+		.send_with_preimage(amount_msat, node_b.node_id(), custom_preimage, None, None)
 		.unwrap();
 
 	// check payment status and verify stored preimage
@@ -2110,7 +2113,7 @@ async fn lsps2_client_trusts_lsp() {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&res, None).unwrap();
+	let payment_id = payer_node.bolt11_payment().send(&res, None, None).unwrap();
 	println!("Payment ID: {:?}", payment_id);
 	let funding_txo = expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
@@ -2285,7 +2288,7 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let _payment_id = payer_node.bolt11_payment().send(&res, None).unwrap();
+	let _payment_id = payer_node.bolt11_payment().send(&res, None, None).unwrap();
 	let funding_txo = expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_channel_pending_event!(client_node, service_node.node_id());

@@ -161,11 +161,11 @@ mod tests {
 
 	use crate::io::test_utils::InMemoryStore;
 	use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
-	use crate::types::{DynStore, DynStoreWrapper};
+	use crate::types::DynStore;
 
 	#[tokio::test]
 	async fn static_invoice_store_test() {
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let store: Arc<DynStore> = Arc::new(InMemoryStore::new());
 		let static_invoice_store = StaticInvoiceStore::new(Arc::clone(&store));
 
 		let static_invoice = invoice();
