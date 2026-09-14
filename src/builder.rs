@@ -1902,6 +1902,7 @@ fn build_with_store_internal(
 		async_payments_role,
 		pending_funding_utxos: Arc::new(Mutex::new(std::collections::HashMap::new())),
 		pending_fund_max: Arc::new(Mutex::new(std::collections::HashSet::new())),
+		pending_funding_fee_rates: Arc::new(Mutex::new(std::collections::HashMap::new())),
 	})
 }
 

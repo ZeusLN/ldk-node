@@ -54,7 +54,7 @@
 //!
 //! 	let node_id = PublicKey::from_str("NODE_ID").unwrap();
 //! 	let node_addr = SocketAddress::from_str("IP_ADDR:PORT").unwrap();
-//! 	node.open_channel(node_id, node_addr, 10000, None, None).unwrap();
+//! 	node.open_channel(node_id, node_addr, 10000, None, None, None).unwrap();
 //!
 //! 	let event = node.wait_next_event();
 //! 	println!("EVENT: {:?}", event);
@@ -177,6 +177,24 @@ use crate::scoring::setup_background_pathfinding_scores_sync;
 #[cfg(feature = "uniffi")]
 uniffi::include_scaffolding!("ldk_node");
 
+#[cfg(not(feature = "uniffi"))]
+type FfiFeeRate = bitcoin::FeeRate;
+#[cfg(feature = "uniffi")]
+type FfiFeeRate = Arc<bitcoin::FeeRate>;
+
+macro_rules! maybe_map_fee_rate_opt {
+	($fee_rate_opt:expr) => {{
+		#[cfg(not(feature = "uniffi"))]
+		{
+			$fee_rate_opt
+		}
+		#[cfg(feature = "uniffi")]
+		{
+			$fee_rate_opt.map(|f| *f)
+		}
+	}};
+}
+
 /// The main interface object of LDK Node, wrapping the necessary LDK and BDK functionalities.
 ///
 /// Needs to be initialized and instantiated through [`Builder::build`].
@@ -214,6 +232,7 @@ pub struct Node {
 	async_payments_role: Option<AsyncPaymentsRole>,
 	pending_funding_utxos: Arc<Mutex<HashMap<u128, Vec<OutPoint>>>>,
 	pending_fund_max: Arc<Mutex<std::collections::HashSet<u128>>>,
+	pending_funding_fee_rates: Arc<Mutex<HashMap<u128, bitcoin::FeeRate>>>,
 }
 
 impl Node {
@@ -568,6 +587,7 @@ impl Node {
 			Arc::clone(&self.config),
 			Arc::clone(&self.pending_funding_utxos),
 			Arc::clone(&self.pending_fund_max),
+			Arc::clone(&self.pending_funding_fee_rates),
 		));
 
 		// Setup background processing
@@ -1109,7 +1129,7 @@ impl Node {
 	fn open_channel_inner(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		announce_for_forwarding: bool,
+		announce_for_forwarding: bool, fee_rate: Option<bitcoin::FeeRate>,
 	) -> Result<UserChannelId, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -1159,6 +1179,12 @@ impl Node {
 					"Initiated channel creation with peer {}. ",
 					peer_info.node_id
 				);
+				if let Some(fee_rate) = fee_rate {
+					self.pending_funding_fee_rates
+						.lock()
+						.unwrap()
+						.insert(user_channel_id, fee_rate);
+				}
 				self.peer_store.add_peer(peer_info)?;
 				Ok(UserChannelId(user_channel_id))
 			},
@@ -1228,13 +1254,18 @@ impl Node {
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
 	/// opening the channel.
 	///
+	/// If `fee_rate` is set it will be used on the funding transaction. Otherwise we'll retrieve
+	/// a reasonable estimate from the configured chain source.
+	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		fee_rate: Option<FfiFeeRate>,
 	) -> Result<UserChannelId, Error> {
+		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
@@ -1242,6 +1273,7 @@ impl Node {
 			push_to_counterparty_msat,
 			channel_config,
 			false,
+			fee_rate_opt,
 		)
 	}
 
@@ -1263,18 +1295,23 @@ impl Node {
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
 	/// opening the channel.
 	///
+	/// If `fee_rate` is set it will be used on the funding transaction. Otherwise we'll retrieve
+	/// a reasonable estimate from the configured chain source.
+	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_announced_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		fee_rate: Option<FfiFeeRate>,
 	) -> Result<UserChannelId, Error> {
 		if let Err(err) = may_announce_channel(&self.config) {
 			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
 			return Err(Error::ChannelCreationFailed { message: format!("Node not configured for channel forwarding: {}", err) });
 		}
 
+		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
@@ -1282,6 +1319,7 @@ impl Node {
 			push_to_counterparty_msat,
 			channel_config,
 			true,
+			fee_rate_opt,
 		)
 	}
 
@@ -1290,10 +1328,17 @@ impl Node {
 	pub fn open_channel_with_utxos(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		utxos: Vec<OutPoint>,
+		utxos: Vec<OutPoint>, fee_rate: Option<FfiFeeRate>,
 	) -> Result<UserChannelId, Error> {
+		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
 		let user_channel_id = self.open_channel_inner(
-			node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, false,
+			node_id,
+			address,
+			channel_amount_sats,
+			push_to_counterparty_msat,
+			channel_config,
+			false,
+			fee_rate_opt,
 		)?;
 		self.pending_funding_utxos.lock().unwrap().insert(user_channel_id.0, utxos);
 		Ok(user_channel_id)
@@ -1304,15 +1349,22 @@ impl Node {
 	pub fn open_announced_channel_with_utxos(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		utxos: Vec<OutPoint>,
+		utxos: Vec<OutPoint>, fee_rate: Option<FfiFeeRate>,
 	) -> Result<UserChannelId, Error> {
 		if let Err(err) = may_announce_channel(&self.config) {
 			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
 			return Err(Error::ChannelCreationFailed { message: format!("Node not configured for channel forwarding: {}", err) });
 		}
 
+		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
 		let user_channel_id = self.open_channel_inner(
-			node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, true,
+			node_id,
+			address,
+			channel_amount_sats,
+			push_to_counterparty_msat,
+			channel_config,
+			true,
+			fee_rate_opt,
 		)?;
 		self.pending_funding_utxos.lock().unwrap().insert(user_channel_id.0, utxos);
 		Ok(user_channel_id)
@@ -1321,20 +1373,34 @@ impl Node {
 	/// Connect to a node and open a new unannounced channel, funding it with the maximum
 	/// possible amount from the on-chain wallet.
 	pub fn open_channel_fund_max(
-		&self, node_id: PublicKey, address: SocketAddress,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		utxos: Option<Vec<OutPoint>>,
+		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
+		channel_config: Option<ChannelConfig>, utxos: Option<Vec<OutPoint>>,
+		fee_rate: Option<FfiFeeRate>,
 	) -> Result<UserChannelId, Error> {
-		let channel_amount_sats = self.estimate_max_channel_amount(&node_id, utxos.as_deref())?;
+		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		let channel_amount_sats =
+			self.estimate_max_channel_amount(&node_id, utxos.as_deref(), fee_rate_opt)?;
 		let user_channel_id = if let Some(utxos) = utxos {
 			let ucid = self.open_channel_inner(
-				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, false,
+				node_id,
+				address,
+				channel_amount_sats,
+				push_to_counterparty_msat,
+				channel_config,
+				false,
+				fee_rate_opt,
 			)?;
 			self.pending_funding_utxos.lock().unwrap().insert(ucid.0, utxos);
 			ucid
 		} else {
 			self.open_channel_inner(
-				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, false,
+				node_id,
+				address,
+				channel_amount_sats,
+				push_to_counterparty_msat,
+				channel_config,
+				false,
+				fee_rate_opt,
 			)?
 		};
 		self.pending_fund_max.lock().unwrap().insert(user_channel_id.0);
@@ -1344,25 +1410,39 @@ impl Node {
 	/// Connect to a node and open a new announced channel, funding it with the maximum
 	/// possible amount from the on-chain wallet.
 	pub fn open_announced_channel_fund_max(
-		&self, node_id: PublicKey, address: SocketAddress,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		utxos: Option<Vec<OutPoint>>,
+		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
+		channel_config: Option<ChannelConfig>, utxos: Option<Vec<OutPoint>>,
+		fee_rate: Option<FfiFeeRate>,
 	) -> Result<UserChannelId, Error> {
 		if let Err(err) = may_announce_channel(&self.config) {
 			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
 			return Err(Error::ChannelCreationFailed { message: format!("Node not configured for channel forwarding: {}", err) });
 		}
 
-		let channel_amount_sats = self.estimate_max_channel_amount(&node_id, utxos.as_deref())?;
+		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		let channel_amount_sats =
+			self.estimate_max_channel_amount(&node_id, utxos.as_deref(), fee_rate_opt)?;
 		let user_channel_id = if let Some(utxos) = utxos {
 			let ucid = self.open_channel_inner(
-				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, true,
+				node_id,
+				address,
+				channel_amount_sats,
+				push_to_counterparty_msat,
+				channel_config,
+				true,
+				fee_rate_opt,
 			)?;
 			self.pending_funding_utxos.lock().unwrap().insert(ucid.0, utxos);
 			ucid
 		} else {
 			self.open_channel_inner(
-				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, true,
+				node_id,
+				address,
+				channel_amount_sats,
+				push_to_counterparty_msat,
+				channel_config,
+				true,
+				fee_rate_opt,
 			)?
 		};
 		self.pending_fund_max.lock().unwrap().insert(user_channel_id.0);
@@ -1371,6 +1451,7 @@ impl Node {
 
 	fn estimate_max_channel_amount(
 		&self, _peer_node_id: &PublicKey, utxos: Option<&[OutPoint]>,
+		fee_rate: Option<bitcoin::FeeRate>,
 	) -> Result<u64, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -1393,6 +1474,7 @@ impl Node {
 			confirmation_target,
 			reserve,
 			utxos_owned,
+			fee_rate,
 		)?;
 
 		if max_amount == 0 {

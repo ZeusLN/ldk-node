@@ -657,6 +657,7 @@ pub async fn open_channel_push_amt(
 				funding_amount_sat,
 				push_amount_msat,
 				None,
+				None,
 			)
 			.unwrap();
 	} else {
@@ -666,6 +667,7 @@ pub async fn open_channel_push_amt(
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
 				funding_amount_sat,
 				push_amount_msat,
+				None,
 				None,
 			)
 			.unwrap();
@@ -744,6 +746,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			node_b.listening_addresses().unwrap().first().unwrap().clone(),
 			funding_amount_sat,
 			Some(push_msat),
+			None,
 			None,
 		)
 		.unwrap();
