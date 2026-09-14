@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Amount, OutPoint};
+use bitcoin::{Amount, FeeRate, OutPoint};
 use lightning::events::bump_transaction::BumpTransactionEvent;
 use lightning::events::{
 	ClosureReason, Event as LdkEvent, PaymentFailureReason, PaymentPurpose, ReplayEvent,
@@ -500,6 +500,7 @@ where
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	pending_funding_utxos: Arc<Mutex<HashMap<u128, Vec<OutPoint>>>>,
 	pending_fund_max: Arc<Mutex<HashSet<u128>>>,
+	pending_funding_fee_rates: Arc<Mutex<HashMap<u128, FeeRate>>>,
 }
 
 impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
@@ -519,6 +520,7 @@ where
 		config: Arc<Config>,
 		pending_funding_utxos: Arc<Mutex<HashMap<u128, Vec<OutPoint>>>>,
 		pending_fund_max: Arc<Mutex<HashSet<u128>>>,
+		pending_funding_fee_rates: Arc<Mutex<HashMap<u128, FeeRate>>>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -540,6 +542,7 @@ where
 			om_mailbox,
 			pending_funding_utxos,
 			pending_fund_max,
+			pending_funding_fee_rates,
 		}
 	}
 
@@ -565,6 +568,9 @@ where
 					self.pending_funding_utxos.lock().unwrap().remove(&user_channel_id);
 				// Clean up fund_max flag if present.
 				self.pending_fund_max.lock().unwrap().remove(&user_channel_id);
+				// Look up and remove any pending fee-rate override for this channel.
+				let pending_fee_rate =
+					self.pending_funding_fee_rates.lock().unwrap().remove(&user_channel_id);
 
 				// Sign the final funding transaction and broadcast it.
 				let channel_amount = Amount::from_sat(channel_value_satoshis);
@@ -574,6 +580,7 @@ where
 					confirmation_target,
 					locktime,
 					pending_utxos,
+					pending_fee_rate,
 				) {
 					Ok(final_tx) => {
 						let needs_manual_broadcast =
@@ -1516,6 +1523,12 @@ where
 				last_local_balance_msat,
 			} => {
 				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
+
+				// Clean up any funding state still pending if the channel went away before
+				// the funding transaction was generated.
+				self.pending_funding_utxos.lock().unwrap().remove(&user_channel_id);
+				self.pending_fund_max.lock().unwrap().remove(&user_channel_id);
+				self.pending_funding_fee_rates.lock().unwrap().remove(&user_channel_id);
 
 				let closed_at_timestamp = SystemTime::now()
 					.duration_since(UNIX_EPOCH)
