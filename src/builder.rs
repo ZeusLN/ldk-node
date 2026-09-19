@@ -2112,6 +2112,7 @@ fn build_with_store_internal(
 			strategy,
 			interval: probing_cfg.interval,
 			max_locked_msat: probing_cfg.max_locked_msat,
+			probe_observer: probing_cfg.probe_observer.clone(),
 		})
 	});
 

@@ -1194,9 +1194,9 @@ where
 					prober.handle_background_probe_successful(&path, payment_id);
 				}
 			},
-			LdkEvent::ProbeFailed { path, payment_id, .. } => {
+			LdkEvent::ProbeFailed { path, payment_id, short_channel_id, .. } => {
 				if let Some(prober) = &self.prober {
-					prober.handle_background_probe_failed(&path, payment_id);
+					prober.handle_background_probe_failed(&path, payment_id, short_channel_id);
 				}
 			},
 			LdkEvent::HTLCHandlingFailed { failure_type, .. } => {

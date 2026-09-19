@@ -48,6 +48,13 @@
 //! # }
 //! ```
 //!
+//! # Observing outcomes
+//!
+//! By default a probe's result is folded into the scorer's liquidity bounds and the individual
+//! event is discarded: what survives is a decayed `(min, max)` interval per channel direction,
+//! with the probe's timing, path and amount gone. Register a [`ProbeObserver`] via
+//! [`ProbingConfigBuilder::probe_observer`] to receive each [`ProbeOutcome`] as it happens.
+//!
 //! # Caution
 //!
 //! Probes send real HTLCs along real paths. If an intermediate hop is offline or
@@ -107,6 +114,84 @@ impl fmt::Debug for ProbingStrategyKind {
 	}
 }
 
+/// How a probe ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProbeStatus {
+	/// The probe traversed the whole path and failed at the recipient, as probes are built to
+	/// do. Every hop on the path had enough liquidity to forward the probe amount.
+	Succeeded,
+	/// The probe failed before reaching the recipient.
+	Failed {
+		/// The channel responsible for the failure, when LDK could attribute one.
+		///
+		/// Note this may be an SCID alias rather than a public-graph scid, particularly for the
+		/// first hop or for route hints, and aliases may collide with real public scids. Consumers
+		/// that join against a public graph must tolerate a miss.
+		failing_scid: Option<u64>,
+	},
+}
+
+/// The observed outcome of a single probe dispatched by this node.
+///
+/// Delivered to a [`ProbeObserver`] registered via
+/// [`ProbingConfigBuilder::probe_observer`]. One outcome is reported per probe, for both
+/// background probes fired by the [`Prober`] and probes sent directly through
+/// [`SpontaneousPayment::send_probes`].
+///
+/// [`SpontaneousPayment::send_probes`]: crate::payment::SpontaneousPayment::send_probes
+#[derive(Clone, Debug)]
+pub struct ProbeOutcome {
+	/// The id LDK assigned when the probe was sent.
+	pub payment_id: PaymentId,
+	/// Whether the probe reached the recipient, and if not, where it died.
+	pub status: ProbeStatus,
+	/// The probe's destination, i.e. the last hop's pubkey.
+	pub destination: PublicKey,
+	/// Every hop's pubkey, in path order.
+	pub path_pubkeys: Vec<PublicKey>,
+	/// Every hop's short channel id, in path order.
+	pub path_scids: Vec<u64>,
+	/// Millisatoshis delivered to the destination, i.e. the amount the path was probed at.
+	pub amount_msat: u64,
+	/// Total routing fee the path would have charged, in millisatoshis.
+	pub fee_msat: u64,
+}
+
+impl ProbeOutcome {
+	fn from_path(payment_id: PaymentId, status: ProbeStatus, path: &Path) -> Option<Self> {
+		// A probe with no hops carries no information and has no destination to report.
+		let destination = path.hops.last()?.pubkey;
+		Some(Self {
+			payment_id,
+			status,
+			destination,
+			path_pubkeys: path.hops.iter().map(|h| h.pubkey).collect(),
+			path_scids: path.hops.iter().map(|h| h.short_channel_id).collect(),
+			amount_msat: path.final_value_msat(),
+			fee_msat: path.fee_msat(),
+		})
+	}
+}
+
+/// A sink for probe outcomes.
+///
+/// Implement this and register it with [`ProbingConfigBuilder::probe_observer`] to receive every
+/// probe result this node observes. LDK's scorer collapses probe outcomes into decayed liquidity
+/// bounds and discards the individual events; an observer is the only way to retain them.
+///
+/// # Caution
+///
+/// [`on_probe_outcome`] is called inline on the event-handling path. It must not block: do the
+/// cheapest possible handoff (append to a buffer, send on a channel) and move real work,
+/// especially anything touching the filesystem or network, to another task. A slow observer
+/// stalls event handling for the whole node.
+///
+/// [`on_probe_outcome`]: Self::on_probe_outcome
+pub trait ProbeObserver: Send + Sync {
+	/// Called once per observed probe outcome.
+	fn on_probe_outcome(&self, outcome: ProbeOutcome);
+}
+
 /// Configuration for the background probing subsystem.
 ///
 /// Instances are produced by [`ProbingConfigBuilder`], which exposes three strategy
@@ -155,7 +240,7 @@ impl fmt::Debug for ProbingStrategyKind {
 ///     }
 /// }
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct ProbingConfig {
 	pub(crate) kind: ProbingStrategyKind,
@@ -163,6 +248,22 @@ pub struct ProbingConfig {
 	pub(crate) max_locked_msat: u64,
 	pub(crate) diversity_penalty_msat: Option<u64>,
 	pub(crate) cooldown: Duration,
+	pub(crate) probe_observer: Option<Arc<dyn ProbeObserver>>,
+}
+
+// Hand-written because `Arc<dyn ProbeObserver>` cannot derive `Debug`, mirroring the treatment
+// of `ProbingStrategyKind::Custom` above.
+impl fmt::Debug for ProbingConfig {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("ProbingConfig")
+			.field("kind", &self.kind)
+			.field("interval", &self.interval)
+			.field("max_locked_msat", &self.max_locked_msat)
+			.field("diversity_penalty_msat", &self.diversity_penalty_msat)
+			.field("cooldown", &self.cooldown)
+			.field("probe_observer", &self.probe_observer.as_ref().map(|_| "<probe observer>"))
+			.finish()
+	}
 }
 
 /// Builder for [`ProbingConfig`].
@@ -181,6 +282,7 @@ pub struct ProbingConfigBuilder {
 	max_locked_msat: u64,
 	diversity_penalty_msat: Option<u64>,
 	cooldown: Duration,
+	probe_observer: Option<Arc<dyn ProbeObserver>>,
 }
 
 impl ProbingConfigBuilder {
@@ -191,6 +293,7 @@ impl ProbingConfigBuilder {
 			max_locked_msat: DEFAULT_MAX_PROBE_LOCKED_MSAT,
 			diversity_penalty_msat: None,
 			cooldown: Duration::from_secs(DEFAULT_PROBED_NODE_COOLDOWN_SECS),
+			probe_observer: None,
 		}
 	}
 
@@ -254,6 +357,17 @@ impl ProbingConfigBuilder {
 		self
 	}
 
+	/// Registers a sink for individual probe outcomes.
+	///
+	/// Without an observer, probe results are folded into the scorer's liquidity bounds and the
+	/// individual events are lost. See [`ProbeObserver`] for the no-blocking requirement.
+	///
+	/// Unset by default.
+	pub fn probe_observer(&mut self, observer: Arc<dyn ProbeObserver>) -> &mut Self {
+		self.probe_observer = Some(observer);
+		self
+	}
+
 	/// Builds the [`ProbingConfig`].
 	pub fn build(&self) -> ProbingConfig {
 		ProbingConfig {
@@ -262,6 +376,7 @@ impl ProbingConfigBuilder {
 			max_locked_msat: self.max_locked_msat,
 			diversity_penalty_msat: self.diversity_penalty_msat,
 			cooldown: self.cooldown,
+			probe_observer: self.probe_observer.clone(),
 		}
 	}
 }
@@ -741,6 +856,8 @@ pub struct Prober {
 	pub interval: Duration,
 	/// Maximum total millisatoshis that may be locked in in-flight probes at any time.
 	pub max_locked_msat: u64,
+	/// Optional sink for individual probe outcomes.
+	pub probe_observer: Option<Arc<dyn ProbeObserver>>,
 }
 
 fn fmt_path(path: &lightning::routing::router::Path) -> String {
@@ -774,15 +891,35 @@ impl Prober {
 			payment_id,
 			fmt_path(path)
 		);
+		self.report_probe_outcome(payment_id, ProbeStatus::Succeeded, path);
 	}
 
-	pub(crate) fn handle_background_probe_failed(&self, path: &Path, payment_id: PaymentId) {
+	pub(crate) fn handle_background_probe_failed(
+		&self, path: &Path, payment_id: PaymentId, failing_scid: Option<u64>,
+	) {
 		log_debug!(
 			self.logger,
-			"Background probe with payment_id: {} failed along the path: {}",
+			"Background probe with payment_id: {} failed at scid {:?} along the path: {}",
 			payment_id,
+			failing_scid,
 			fmt_path(path)
 		);
+		self.report_probe_outcome(payment_id, ProbeStatus::Failed { failing_scid }, path);
+	}
+
+	fn report_probe_outcome(&self, payment_id: PaymentId, status: ProbeStatus, path: &Path) {
+		let Some(observer) = self.probe_observer.as_ref() else {
+			return;
+		};
+		match ProbeOutcome::from_path(payment_id, status, path) {
+			Some(outcome) => observer.on_probe_outcome(outcome),
+			// An empty path carries no destination and no hops to attribute; nothing to report.
+			None => log_debug!(
+				self.logger,
+				"Dropping probe outcome for payment_id {}: empty path",
+				payment_id
+			),
+		}
 	}
 }
 
@@ -829,5 +966,95 @@ pub(crate) async fn run_prober(prober: Arc<Prober>, mut stop_rx: tokio::sync::wa
 				}
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use bitcoin::secp256k1::{Secp256k1, SecretKey};
+
+	use super::*;
+
+	fn pubkey(b: u8) -> PublicKey {
+		let secp = Secp256k1::new();
+		let sk = SecretKey::from_slice(&[b; 32]).unwrap();
+		PublicKey::from_secret_key(&secp, &sk)
+	}
+
+	fn hop(b: u8, scid: u64, fee_msat: u64) -> RouteHop {
+		RouteHop {
+			pubkey: pubkey(b),
+			node_features: NodeFeatures::empty(),
+			short_channel_id: scid,
+			channel_features: ChannelFeatures::empty(),
+			fee_msat,
+			cltv_expiry_delta: 40,
+			maybe_announced_channel: true,
+		}
+	}
+
+	/// Three hops: the last hop's `fee_msat` is the delivered amount, the earlier ones are fees.
+	fn three_hop_path() -> Path {
+		Path {
+			hops: vec![hop(1, 111, 10), hop(2, 222, 25), hop(3, 333, 50_000)],
+			blinded_tail: None,
+		}
+	}
+
+	#[test]
+	fn maps_path_to_outcome() {
+		let path = three_hop_path();
+		let out =
+			ProbeOutcome::from_path(PaymentId([7; 32]), ProbeStatus::Succeeded, &path).unwrap();
+
+		assert_eq!(out.payment_id, PaymentId([7; 32]));
+		assert_eq!(out.status, ProbeStatus::Succeeded);
+		assert_eq!(out.destination, pubkey(3));
+		assert_eq!(out.path_scids, vec![111, 222, 333]);
+		assert_eq!(out.path_pubkeys, vec![pubkey(1), pubkey(2), pubkey(3)]);
+		// Delivered amount is the last hop's fee_msat, not the sum.
+		assert_eq!(out.amount_msat, 50_000);
+		// Fees exclude the last hop.
+		assert_eq!(out.fee_msat, 35);
+	}
+
+	#[test]
+	fn carries_failing_scid() {
+		let path = three_hop_path();
+		let status = ProbeStatus::Failed { failing_scid: Some(222) };
+		let out = ProbeOutcome::from_path(PaymentId([7; 32]), status, &path).unwrap();
+		assert_eq!(out.status, ProbeStatus::Failed { failing_scid: Some(222) });
+		// The failing scid is always one of the path's own hops when LDK attributes one.
+		assert!(out.path_scids.contains(&222));
+	}
+
+	#[test]
+	fn unattributed_failure_is_representable() {
+		let path = three_hop_path();
+		let status = ProbeStatus::Failed { failing_scid: None };
+		let out = ProbeOutcome::from_path(PaymentId([7; 32]), status, &path).unwrap();
+		assert_eq!(out.status, ProbeStatus::Failed { failing_scid: None });
+	}
+
+	/// An empty path has no destination, so there is nothing to report. Must not panic.
+	#[test]
+	fn empty_path_yields_nothing() {
+		let path = Path { hops: vec![], blinded_tail: None };
+		assert!(
+			ProbeOutcome::from_path(PaymentId([7; 32]), ProbeStatus::Succeeded, &path).is_none()
+		);
+	}
+
+	/// A single-hop path (direct channel to the destination) is still reportable: the whole
+	/// amount is the one hop's fee_msat and the routing fee is zero.
+	#[test]
+	fn single_hop_path_is_reportable() {
+		let path = Path { hops: vec![hop(9, 999, 1_000)], blinded_tail: None };
+		let out =
+			ProbeOutcome::from_path(PaymentId([1; 32]), ProbeStatus::Succeeded, &path).unwrap();
+		assert_eq!(out.destination, pubkey(9));
+		assert_eq!(out.path_scids, vec![999]);
+		assert_eq!(out.amount_msat, 1_000);
+		assert_eq!(out.fee_msat, 0);
 	}
 }
