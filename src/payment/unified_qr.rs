@@ -155,9 +155,17 @@ impl UnifiedQrPayment {
 
 		if let Some(offer) = uri_network_checked.extras.bolt12_offer {
 			let offer = maybe_wrap(offer);
-			match self.bolt12_payment.send(&offer, None, None, route_parameters, payment_timeout_secs) {
+			match self.bolt12_payment.send(
+				&offer,
+				None,
+				None,
+				route_parameters,
+				payment_timeout_secs,
+			) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt12 { payment_id }),
-				Err(e) => log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified QR code payment. Falling back to the BOLT11 invoice.", e),
+				Err(e) => {
+					log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified QR code payment. Falling back to the BOLT11 invoice.", e);
+				},
 			}
 		}
 
@@ -165,7 +173,9 @@ impl UnifiedQrPayment {
 			let invoice = maybe_wrap(invoice);
 			match self.bolt11_invoice.send(&invoice, route_parameters, payment_timeout_secs) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt11 { payment_id }),
-				Err(e) => log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified QR code payment. Falling back to the on-chain transaction.", e),
+				Err(e) => {
+					log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified QR code payment. Falling back to the on-chain transaction.", e);
+				},
 			}
 		}
 
