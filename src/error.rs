@@ -150,7 +150,9 @@ impl fmt::Display for Error {
 			Self::PaymentSendingFailed => write!(f, "Failed to send the given payment."),
 			Self::InvalidCustomTlvs => write!(f, "Failed to construct payment with custom TLVs."),
 			Self::ProbeSendingFailed => write!(f, "Failed to send the given payment probe."),
-			Self::ChannelCreationFailed { ref message } => write!(f, "Failed to create channel: {}", message),
+			Self::ChannelCreationFailed { ref message } => {
+				write!(f, "Failed to create channel: {}", message)
+			},
 			Self::ChannelClosingFailed => write!(f, "Failed to close channel."),
 			Self::ChannelSplicingFailed => write!(f, "Failed to splice channel."),
 			Self::ChannelConfigUpdateFailed => write!(f, "Failed to update channel config."),

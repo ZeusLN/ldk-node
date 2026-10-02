@@ -29,14 +29,14 @@ use lightning_liquidity::lsps1::event::LSPS1ClientEvent;
 use lightning_liquidity::lsps1::msgs::{
 	LSPS1ChannelInfo, LSPS1Options, LSPS1OrderId, LSPS1OrderParams,
 };
-use lightning_liquidity::lsps7::client::LSPS7ClientConfig as LdkLSPS7ClientConfig;
-use lightning_liquidity::lsps7::event::LSPS7ClientEvent;
-use lightning_liquidity::lsps7::msgs::{LSPS7ExtendableChannel, LSPS7OrderId, LSPS7OrderState};
 use lightning_liquidity::lsps2::client::LSPS2ClientConfig as LdkLSPS2ClientConfig;
 use lightning_liquidity::lsps2::event::{LSPS2ClientEvent, LSPS2ServiceEvent};
 use lightning_liquidity::lsps2::msgs::{LSPS2OpeningFeeParams, LSPS2RawOpeningFeeParams};
 use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceConfig;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
+use lightning_liquidity::lsps7::client::LSPS7ClientConfig as LdkLSPS7ClientConfig;
+use lightning_liquidity::lsps7::event::LSPS7ClientEvent;
+use lightning_liquidity::lsps7::msgs::{LSPS7ExtendableChannel, LSPS7OrderId, LSPS7OrderState};
 use lightning_liquidity::{LiquidityClientConfig, LiquidityServiceConfig};
 use lightning_types::payment::PaymentHash;
 use rand::Rng;
@@ -1093,10 +1093,7 @@ where
 						);
 					}
 				} else {
-					log_error!(
-						self.logger,
-						"Received unexpected LSPS7Client::OrderCreated event!"
-					);
+					log_error!(self.logger, "Received unexpected LSPS7Client::OrderCreated event!");
 				}
 			},
 			LiquidityEvent::LSPS7Client(LSPS7ClientEvent::OrderStatus {
@@ -1158,10 +1155,7 @@ where
 						);
 					}
 				} else {
-					log_error!(
-						self.logger,
-						"Received unexpected LSPS7Client::OrderStatus event!"
-					);
+					log_error!(self.logger, "Received unexpected LSPS7Client::OrderStatus event!");
 				}
 			},
 			LiquidityEvent::LSPS7Client(LSPS7ClientEvent::OrderRequestFailed {
@@ -1178,11 +1172,7 @@ where
 				);
 				if let Some(lsps7_client) = self.lsps7_client.as_ref() {
 					// Could be either create or check - remove from both
-					lsps7_client
-						.pending_create_order_requests
-						.lock()
-						.unwrap()
-						.remove(&request_id);
+					lsps7_client.pending_create_order_requests.lock().unwrap().remove(&request_id);
 					lsps7_client
 						.pending_check_order_status_requests
 						.lock()
@@ -1374,8 +1364,7 @@ where
 		{
 			let mut pending_requests_lock =
 				lsps7_client.pending_get_extendable_channels_requests.lock().unwrap();
-			let request_id =
-				client_handler.request_extendable_channels(lsps7_client.lsp_node_id);
+			let request_id = client_handler.request_extendable_channels(lsps7_client.lsp_node_id);
 			pending_requests_lock.insert(request_id, request_sender);
 		}
 
@@ -1386,11 +1375,7 @@ where
 				Error::LiquidityRequestFailed
 			})?
 			.map_err(|e| {
-				log_error!(
-					self.logger,
-					"Failed to handle response from liquidity service: {}",
-					e
-				);
+				log_error!(self.logger, "Failed to handle response from liquidity service: {}", e);
 				Error::LiquidityRequestFailed
 			})
 	}
@@ -1421,19 +1406,21 @@ where
 			pending_requests_lock.insert(request_id.clone(), request_sender);
 		}
 
-		tokio::time::timeout(
-			Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS),
-			request_receiver,
-		)
-		.await
-		.map_err(|e| {
-			log_error!(self.logger, "Liquidity request with ID {:?} timed out: {}", request_id, e);
-			Error::LiquidityRequestFailed
-		})?
-		.map_err(|e| {
-			log_error!(self.logger, "Failed to handle response from liquidity service: {}", e);
-			Error::LiquidityRequestFailed
-		})
+		tokio::time::timeout(Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS), request_receiver)
+			.await
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Liquidity request with ID {:?} timed out: {}",
+					request_id,
+					e
+				);
+				Error::LiquidityRequestFailed
+			})?
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to handle response from liquidity service: {}", e);
+				Error::LiquidityRequestFailed
+			})
 	}
 
 	pub(crate) async fn lsps7_check_order_status(
@@ -1449,24 +1436,20 @@ where
 		{
 			let mut pending_requests_lock =
 				lsps7_client.pending_check_order_status_requests.lock().unwrap();
-			let request_id =
-				client_handler.check_order_status(&lsps7_client.lsp_node_id, order_id);
+			let request_id = client_handler.check_order_status(&lsps7_client.lsp_node_id, order_id);
 			pending_requests_lock.insert(request_id, request_sender);
 		}
 
-		tokio::time::timeout(
-			Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS),
-			request_receiver,
-		)
-		.await
-		.map_err(|e| {
-			log_error!(self.logger, "Liquidity request timed out: {}", e);
-			Error::LiquidityRequestFailed
-		})?
-		.map_err(|e| {
-			log_error!(self.logger, "Failed to handle response from liquidity service: {}", e);
-			Error::LiquidityRequestFailed
-		})
+		tokio::time::timeout(Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS), request_receiver)
+			.await
+			.map_err(|e| {
+				log_error!(self.logger, "Liquidity request timed out: {}", e);
+				Error::LiquidityRequestFailed
+			})?
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to handle response from liquidity service: {}", e);
+				Error::LiquidityRequestFailed
+			})
 	}
 
 	pub(crate) async fn lsps2_receive_to_jit_channel(
@@ -1989,9 +1972,9 @@ impl LSPS7Liquidity {
 		log_info!(self.logger, "Connected to LSP {}@{}. ", lsp_node_id, lsp_address);
 
 		let liquidity_source = Arc::clone(&liquidity_source);
-		let response = self.runtime.block_on(async move {
-			liquidity_source.lsps7_get_extendable_channels().await
-		})?;
+		let response = self
+			.runtime
+			.block_on(async move { liquidity_source.lsps7_get_extendable_channels().await })?;
 
 		Ok(response)
 	}
@@ -2065,9 +2048,7 @@ impl LSPS7Liquidity {
 
 		let liquidity_source = Arc::clone(&liquidity_source);
 		let response = self.runtime.block_on(async move {
-			liquidity_source
-				.lsps7_check_order_status(LSPS7OrderId(order_id))
-				.await
+			liquidity_source.lsps7_check_order_status(LSPS7OrderId(order_id)).await
 		})?;
 		Ok(response)
 	}

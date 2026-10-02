@@ -165,8 +165,8 @@ impl SpontaneousPayment {
 			PaymentId(payment_hash.0),
 			route_params,
 			Retry::Timeout(
-			payment_timeout_secs.map(Duration::from_secs).unwrap_or(LDK_PAYMENT_RETRY_TIMEOUT),
-		),
+				payment_timeout_secs.map(Duration::from_secs).unwrap_or(LDK_PAYMENT_RETRY_TIMEOUT),
+			),
 		) {
 			Ok(_hash) => {
 				log_info!(self.logger, "Initiated sending {}msat to {}.", amount_msat, node_id);
