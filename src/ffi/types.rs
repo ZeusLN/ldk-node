@@ -20,7 +20,7 @@ pub use bip39::Mnemonic;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
-pub use bitcoin::{Address, BlockHash, FeeRate, Network, OutPoint, ScriptBuf, Txid};
+pub use bitcoin::{Address, BlockHash, FeeRate, Network, ScriptBuf, Txid};
 pub use lightning::chain::channelmonitor::BalanceSource;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
 use lightning::ln::channelmanager::PaymentId;
