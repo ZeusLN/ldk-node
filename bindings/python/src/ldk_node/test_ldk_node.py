@@ -205,7 +205,7 @@ class TestLdkNode(unittest.TestCase):
 
         description = Bolt11InvoiceDescription.DIRECT("asdf")
         invoice = node_2.bolt11_payment().receive(2500000, description, 9217)
-        node_1.bolt11_payment().send(invoice, None)
+        node_1.bolt11_payment().send(invoice, None, None)
 
         payment_successful_event_1 = node_1.wait_next_event()
         assert isinstance(payment_successful_event_1, Event.PAYMENT_SUCCESSFUL)
