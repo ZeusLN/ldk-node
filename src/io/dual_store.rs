@@ -166,12 +166,7 @@ impl DualStore {
 			}
 		};
 		let mirror = Arc::new(MirrorQueue::new(initial));
-		spawn_mirror_worker(
-			Arc::clone(&local),
-			Arc::clone(&vss),
-			push_gate,
-			Arc::clone(&mirror),
-		);
+		spawn_mirror_worker(Arc::clone(&local), Arc::clone(&vss), push_gate, Arc::clone(&mirror));
 
 		Self { vss, local, restore_mode, mirror }
 	}
@@ -355,11 +350,8 @@ impl MirrorQueue {
 				);
 				return;
 			}
-			state = self
-				.wake
-				.wait_timeout(state, deadline - now)
-				.unwrap_or_else(|p| p.into_inner())
-				.0;
+			state =
+				self.wake.wait_timeout(state, deadline - now).unwrap_or_else(|p| p.into_inner()).0;
 		}
 	}
 }
@@ -655,13 +647,7 @@ impl KVStoreSync for DualStore {
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
 		// Write to local first (must succeed)
-		KVStoreSync::write(
-			self.local.as_ref(),
-			primary_namespace,
-			secondary_namespace,
-			key,
-			buf,
-		)?;
+		KVStoreSync::write(self.local.as_ref(), primary_namespace, secondary_namespace, key, buf)?;
 
 		// The worker uploads it. Marking before returning is what keeps VSS's monitors ahead
 		// of its manager (module docs).
@@ -787,11 +773,7 @@ mod tests {
 
 		/// Position of the first logged write of `key` with `val` (`None` = a remove).
 		fn logged_at(&self, key: &str, val: Option<&[u8]>) -> Option<usize> {
-			self.log
-				.lock()
-				.unwrap()
-				.iter()
-				.position(|(_, k, v)| k == key && v.as_deref() == val)
+			self.log.lock().unwrap().iter().position(|(_, k, v)| k == key && v.as_deref() == val)
 		}
 	}
 
