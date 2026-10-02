@@ -20,8 +20,22 @@
 //! than `NotFound` are propagated (failing the build) rather than masked: treating an
 //! unreachable VSS as an empty one would silently produce a fresh node with no channels.
 //!
-//! **Writes go to local first, then VSS (best-effort).** If the VSS write fails the data is
-//! still safe in local. The next write will try VSS again.
+//! **Writes go to local first, then VSS (best-effort, in order).** Local must succeed; the
+//! key is then marked dirty, and one background worker uploads dirty keys, reading the
+//! CURRENT local value at upload time. So a key's newest value always wins, superseded writes
+//! are never sent, and nothing older can land after something newer (ZeusLN/ldk-node#10: one
+//! thread per write let an older blob win). Failed keys stay dirty and are retried with
+//! backoff.
+//!
+//! **Monitors before the manager.** VSS must never hold a manager newer than a monitor it
+//! treats as persisted: LDK refuses to load that (`DecodeError::DangerousValue`), so a restore
+//! from it fails. The worker reads the manager BEFORE taking its batch of dirty keys, uploads
+//! the monitor keys (full monitors, `MonitorUpdatingPersister` updates, archived monitors),
+//! then removes keys deleted locally, and uploads that manager last, only if every monitor key
+//! in the batch went through. A monitor update LDK treats as complete was marked dirty inside
+//! `write`, before it returned, so it is in the batch or already on VSS. Monitor-key removes
+//! wait for the batch's monitor writes, so an update key is only deleted once the full
+//! monitor that supersedes it is on VSS.
 //!
 //! **Push safety gate.** All pushes to VSS (per-key writes, removes, and the bulk sync) are
 //! gated on a per-session safety check: if the local store has no channel monitors (active or
@@ -29,21 +43,24 @@
 //! built over an existing backup, and every VSS write is disabled for the session to avoid
 //! overwriting the only copy of the real channel state. See `vss_push_verdict`.
 //!
-//! **Background bulk sync.** On construction (except in restore mode), a background thread is
-//! spawned that reads every key from local SQLite and writes each one to VSS. This catches up
-//! any data that was written while VSS was down. The sync runs independently with its own
-//! 60-second timeout and does not block node startup.
+//! **Background bulk sync.** On construction (except in restore mode), every local key is
+//! marked dirty and the same worker uploads them. This catches up anything written while VSS
+//! was down, follows the same ordering, and cannot race a live write. It does not block node
+//! startup. Dropping the store waits up to [`FLUSH_ON_DROP`] for the worker to finish.
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use lightning::io;
 use lightning::util::persist::{
 	KVStore, KVStoreSync, ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
-	ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+	ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_KEY,
+	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 	CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+	CHANNEL_MONITOR_UPDATE_PERSISTENCE_PRIMARY_NAMESPACE,
 };
 // Note: we use eprintln! instead of the `log` crate because the DualStore is constructed
 // before the LDK Node Logger is available, and the `log` facade may not be initialized.
@@ -52,8 +69,12 @@ use lightning::util::persist::{
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::vss_store::VssStore;
 
-/// Timeout for the background bulk sync operation.
-const BULK_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long dropping the store waits for the worker to upload its remaining dirty keys.
+const FLUSH_ON_DROP: Duration = Duration::from_secs(5);
+
+/// Backoff between upload rounds while VSS keeps failing.
+const RETRY_BACKOFF_MIN: Duration = Duration::from_secs(1);
+const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 /// A [`KVStore`]/[`KVStoreSync`] implementation that writes to both a [`VssStore`] and a local
 /// [`SqliteStore`].
@@ -65,19 +86,18 @@ const BULK_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
 ///
 /// ## Write strategy
 /// 1. Write to local [`SqliteStore`] first (fast, reliable, must succeed)
-/// 2. Write to [`VssStore`] (may fail/timeout — non-fatal, logged)
+/// 2. Mark the key dirty; the VSS worker uploads it in order (see module docs)
 ///
 /// ## Remove strategy
-/// 1. Remove from both stores; local must succeed, VSS is best-effort
+/// 1. Remove from local (must succeed), then mark the key dirty; the worker removes it from VSS
 ///
 /// ## List strategy
 /// - **Normal mode**: list from local only.
 /// - **Restore mode**: list from local first; if empty, fall back to VSS.
 ///
 /// ## Background bulk sync
-/// On construction (except in restore mode), spawns a background thread that syncs all local
-/// keys to VSS with a 60-second timeout, subject to the push safety gate. Does not block node
-/// startup.
+/// On construction (except in restore mode), marks every local key dirty for the VSS worker,
+/// subject to the push safety gate. Does not block node startup.
 ///
 /// **Restore mode** is auto-detected: if the local store is empty at construction time,
 /// restore mode is enabled and reads will fall back to VSS. Otherwise, reads are local-only.
@@ -87,21 +107,20 @@ pub struct DualStore {
 	/// When true, reads fall back to VSS on local `NotFound`. Auto-detected at construction:
 	/// `true` if local was empty (restore-from-seed), `false` otherwise.
 	restore_mode: bool,
-	/// Lazily-determined verdict on whether pushing local state to VSS is safe. `None` means
-	/// undetermined (e.g. VSS unreachable during the check): pushes are skipped and the check
-	/// retried on the next push attempt. The mutex also single-flights the check itself, so a
-	/// burst of first pushes doesn't fan out into parallel VSS list calls. See
-	/// `vss_push_verdict`.
-	push_gate: Arc<Mutex<Option<bool>>>,
+	/// Dirty keys for the VSS worker thread. The worker also holds the push safety gate: the
+	/// lazily-determined verdict on whether pushing local state to VSS is safe (`None` means
+	/// undetermined, e.g. VSS unreachable during the check; keys stay dirty and the check is
+	/// retried). See `vss_push_verdict`.
+	mirror: Arc<MirrorQueue>,
 }
 
 impl DualStore {
 	/// Creates a new [`DualStore`] wrapping the given [`VssStore`] and [`SqliteStore`].
 	///
-	/// Unless restore mode is detected (local store empty — nothing to catch up), spawns a
-	/// background thread to bulk-sync all local keys to VSS, subject to the push safety
-	/// check (`vss_push_verdict`). This catches up any data written while VSS was
-	/// previously unreachable. The sync does not block construction.
+	/// Spawns the VSS worker thread. Unless restore mode is detected (local store empty —
+	/// nothing to catch up), every local key starts dirty, so the worker uploads them subject
+	/// to the push safety check (`vss_push_verdict`). This catches up any data written while
+	/// VSS was previously unreachable. The sync does not block construction.
 	pub fn new(vss: VssStore, local: SqliteStore) -> Self {
 		let vss = Arc::new(vss);
 		let local = Arc::new(local);
@@ -133,31 +152,28 @@ impl DualStore {
 		// it back cannot destroy anything.
 		let push_gate = Arc::new(Mutex::new(if restore_mode { Some(true) } else { None }));
 
-		if restore_mode {
+		let initial: HashSet<Key> = if restore_mode {
 			// Nothing to catch up — local started empty this session.
 			eprintln!("DualStore: Restore mode — skipping background bulk sync");
+			HashSet::new()
 		} else {
-			// Spawn background bulk sync (local → VSS)
-			let vss_bg = Arc::clone(&vss);
-			let local_bg = Arc::clone(&local);
-			let gate_bg = Arc::clone(&push_gate);
-			std::thread::Builder::new()
-				.name("dual-store-bulk-sync".to_string())
-				.spawn(move || match vss_push_verdict(&gate_bg, &local_bg, &vss_bg) {
-					PushVerdict::Allowed => bulk_sync_to_vss(&local_bg, &vss_bg),
-					PushVerdict::Undetermined => {
-						eprintln!("DualStore: Bulk sync skipped — push safety not yet determined");
-					},
-					PushVerdict::Disabled => {
-						eprintln!(
-							"DualStore: Bulk sync skipped — VSS pushes disabled this session"
-						);
-					},
-				})
-				.expect("Failed to spawn bulk sync thread");
-		}
+			match local.list_all_keys() {
+				Ok(entries) => entries.into_iter().collect(),
+				Err(e) => {
+					eprintln!("DualStore: Bulk sync skipped — could not list local keys: {}", e);
+					HashSet::new()
+				},
+			}
+		};
+		let mirror = Arc::new(MirrorQueue::new(initial));
+		spawn_mirror_worker(
+			Arc::clone(&local),
+			Arc::clone(&vss),
+			push_gate,
+			Arc::clone(&mirror),
+		);
 
-		Self { vss, local, restore_mode, push_gate }
+		Self { vss, local, restore_mode, mirror }
 	}
 }
 
@@ -198,8 +214,8 @@ enum PushVerdict {
 ///   any new channels opened during it. The logged recovery instruction (restore from seed
 ///   into a new wallet) is the intended path; a wallet should not be operated long-term in
 ///   this state.
-fn vss_push_verdict(
-	gate: &Mutex<Option<bool>>, local: &SqliteStore, vss: &VssStore,
+fn vss_push_verdict<L: KVStoreSync, R: KVStoreSync>(
+	gate: &Mutex<Option<bool>>, local: &L, vss: &R,
 ) -> PushVerdict {
 	// A panicked holder can't invalidate a plain Option cache — recover the guard rather
 	// than wedging every future push on a poisoned mutex.
@@ -261,81 +277,318 @@ fn vss_push_verdict(
 	}
 }
 
-/// Bulk-sync all local keys to VSS with a timeout. Runs on a background thread.
-fn bulk_sync_to_vss(local: &SqliteStore, vss: &VssStore) {
-	let start = std::time::Instant::now();
-	eprintln!("DualStore: Background bulk sync to VSS started");
+/// `(primary_namespace, secondary_namespace, key)`.
+type Key = (String, String, String);
 
-	let entries = match local.list_all_keys() {
-		Ok(entries) => entries,
-		Err(e) => {
-			eprintln!("DualStore: Bulk sync failed — could not list local keys: {}", e);
-			return;
-		},
-	};
+fn key_of(primary_namespace: &str, secondary_namespace: &str, key: &str) -> Key {
+	(primary_namespace.to_string(), secondary_namespace.to_string(), key.to_string())
+}
 
-	let total = entries.len();
-	let mut synced = 0usize;
-	let mut failed = 0usize;
-	let mut timed_out = false;
+fn manager_key() -> Key {
+	key_of(
+		CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_KEY,
+	)
+}
 
-	for (primary_ns, secondary_ns, key) in &entries {
-		// Check timeout
-		if start.elapsed() >= BULK_SYNC_TIMEOUT {
-			eprintln!(
-				"DualStore: Bulk sync timed out after {}s — {}/{} keys synced, stopping",
-				BULK_SYNC_TIMEOUT.as_secs(),
-				synced,
-				total
-			);
-			timed_out = true;
-			break;
-		}
+/// Keys whose VSS copy a restore needs consistent with the manager: full monitors, the
+/// `MonitorUpdatingPersister` update keys, and archived monitors.
+fn is_monitor_family(key: &Key) -> bool {
+	key.0 == CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE
+		|| key.0 == CHANNEL_MONITOR_UPDATE_PERSISTENCE_PRIMARY_NAMESPACE
+		|| key.0 == ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE
+}
 
-		let data = match KVStoreSync::read(local, primary_ns, secondary_ns, key) {
-			Ok(data) => data,
-			Err(e) => {
-				eprintln!(
-					"DualStore: Bulk sync — failed to read local key {}/{}/{}: {}",
-					primary_ns, secondary_ns, key, e
-				);
-				failed += 1;
-				continue;
-			},
-		};
+/// Dirty keys waiting for VSS, plus worker bookkeeping.
+struct MirrorQueue {
+	state: Mutex<QueueState>,
+	/// Signalled on new dirty keys, on shutdown, and when the worker finishes a round or exits.
+	wake: Condvar,
+}
 
-		match KVStoreSync::write(vss, primary_ns, secondary_ns, key, data) {
-			Ok(()) => {
-				synced += 1;
-			},
-			Err(e) => {
-				eprintln!(
-					"DualStore: Bulk sync — failed to write to VSS {}/{}/{}: {}",
-					primary_ns, secondary_ns, key, e
-				);
-				failed += 1;
-			},
+struct QueueState {
+	dirty: HashSet<Key>,
+	/// Set by `Drop`: upload what is dirty, then exit.
+	shutdown: bool,
+	exited: bool,
+	/// Startup-sync progress, logged once, the first time no dirty keys are left.
+	startup_total: usize,
+	startup_started: Instant,
+	startup_logged: bool,
+}
+
+impl MirrorQueue {
+	fn new(initial: HashSet<Key>) -> Self {
+		Self {
+			state: Mutex::new(QueueState {
+				startup_total: initial.len(),
+				startup_logged: initial.is_empty(),
+				dirty: initial,
+				shutdown: false,
+				exited: false,
+				startup_started: Instant::now(),
+			}),
+			wake: Condvar::new(),
 		}
 	}
 
-	let elapsed = start.elapsed();
-	if timed_out {
+	fn mark_dirty(&self, key: Key) {
+		let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+		state.dirty.insert(key);
+		self.wake.notify_all();
+	}
+
+	/// Ask the worker to finish its dirty keys and wait for it, at most `timeout`.
+	fn shutdown_and_wait(&self, timeout: Duration) {
+		let deadline = Instant::now() + timeout;
+		let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+		state.shutdown = true;
+		self.wake.notify_all();
+		while !state.exited {
+			let now = Instant::now();
+			if now >= deadline {
+				eprintln!(
+					"DualStore: {} key(s) not yet on VSS at shutdown; \
+					 the next startup sync uploads them",
+					state.dirty.len()
+				);
+				return;
+			}
+			state = self
+				.wake
+				.wait_timeout(state, deadline - now)
+				.unwrap_or_else(|p| p.into_inner())
+				.0;
+		}
+	}
+}
+
+/// Start the VSS worker thread for `queue`.
+fn spawn_mirror_worker<L, R>(
+	local: Arc<L>, vss: Arc<R>, gate: Arc<Mutex<Option<bool>>>, queue: Arc<MirrorQueue>,
+) where
+	L: KVStoreSync + Send + Sync + 'static,
+	R: KVStoreSync + Send + Sync + 'static,
+{
+	let queue_bg = Arc::clone(&queue);
+	let spawned = std::thread::Builder::new()
+		.name("dual-store-vss-mirror".to_string())
+		.spawn(move || run_mirror_worker(local.as_ref(), vss.as_ref(), &gate, &queue_bg));
+	if let Err(e) = spawned {
 		eprintln!(
-			"DualStore: Background bulk sync incomplete — {}/{} synced, {} failed in {:.1}s (timeout)",
-			synced, total, failed, elapsed.as_secs_f64()
+			"DualStore: Failed to spawn the VSS worker, VSS backup is off this session: {}",
+			e
 		);
-	} else if failed > 0 {
-		eprintln!(
-			"DualStore: Background bulk sync finished with errors — {}/{} synced, {} failed in {:.1}s",
-			synced, total, failed, elapsed.as_secs_f64()
-		);
-	} else {
-		eprintln!(
-			"DualStore: Background bulk sync complete — {}/{} keys synced to VSS in {:.1}s",
-			synced,
-			total,
-			elapsed.as_secs_f64()
-		);
+		let mut state = queue.state.lock().unwrap_or_else(|p| p.into_inner());
+		state.exited = true;
+	}
+}
+
+/// What happened to one key in an upload round.
+enum Outcome {
+	Done,
+	Failed,
+	/// Gone locally; to be removed from VSS after the round's writes.
+	Removed,
+}
+
+fn upload_key<L: KVStoreSync, R: KVStoreSync>(local: &L, vss: &R, key: &Key) -> Outcome {
+	let (pns, sns, k) = key;
+	match KVStoreSync::read(local, pns, sns, k) {
+		Ok(buf) => match KVStoreSync::write(vss, pns, sns, k, buf) {
+			Ok(()) => Outcome::Done,
+			Err(e) => {
+				eprintln!(
+					"DualStore: VSS write failed for {}/{}/{} (local succeeded): {}",
+					pns, sns, k, e
+				);
+				Outcome::Failed
+			},
+		},
+		Err(e) if e.kind() == io::ErrorKind::NotFound => Outcome::Removed,
+		Err(e) => {
+			eprintln!("DualStore: Failed to read local {}/{}/{} for VSS: {}", pns, sns, k, e);
+			Outcome::Failed
+		},
+	}
+}
+
+fn remove_key<R: KVStoreSync>(vss: &R, key: &Key) -> bool {
+	let (pns, sns, k) = key;
+	match KVStoreSync::remove(vss, pns, sns, k, false) {
+		Ok(()) => true,
+		Err(e) => {
+			eprintln!(
+				"DualStore: VSS remove failed for {}/{}/{} (local succeeded): {}",
+				pns, sns, k, e
+			);
+			false
+		},
+	}
+}
+
+/// Upload rounds until shutdown. See the module docs for the ordering rules.
+fn run_mirror_worker<L: KVStoreSync, R: KVStoreSync>(
+	local: &L, vss: &R, gate: &Mutex<Option<bool>>, queue: &MirrorQueue,
+) {
+	let manager = manager_key();
+	let mut backoff = Duration::ZERO;
+
+	loop {
+		// Wait for work, and note whether the manager is dirty.
+		let manager_dirty = {
+			let mut state = queue.state.lock().unwrap_or_else(|p| p.into_inner());
+			while state.dirty.is_empty() && !state.shutdown {
+				state = queue.wake.wait(state).unwrap_or_else(|p| p.into_inner());
+			}
+			if state.dirty.is_empty() {
+				state.exited = true;
+				queue.wake.notify_all();
+				return;
+			}
+			state.dirty.contains(&manager)
+		};
+
+		let mut failed: Vec<Key> = Vec::new();
+		let verdict = vss_push_verdict(gate, local, vss);
+		match verdict {
+			PushVerdict::Allowed => {
+				// Read the manager BEFORE taking the batch, so every monitor key it treats
+				// as persisted is already dirty or on VSS.
+				let manager_snapshot = if manager_dirty {
+					Some(KVStoreSync::read(local, &manager.0, &manager.1, &manager.2))
+				} else {
+					None
+				};
+
+				let mut batch: Vec<Key> = {
+					let mut state = queue.state.lock().unwrap_or_else(|p| p.into_inner());
+					let mut taken = std::mem::take(&mut state.dirty);
+					if taken.remove(&manager) && manager_snapshot.is_none() {
+						// Became dirty after the check above: next round.
+						state.dirty.insert(manager.clone());
+					}
+					taken.into_iter().collect()
+				};
+				// Monitor keys first; the order of the rest does not matter.
+				batch.sort_by_key(|k| (!is_monitor_family(k), k.clone()));
+
+				let mut removals: Vec<Key> = Vec::new();
+				for key in batch {
+					match upload_key(local, vss, &key) {
+						Outcome::Done => {},
+						Outcome::Failed => failed.push(key),
+						Outcome::Removed => removals.push(key),
+					}
+				}
+
+				// Removes go after the writes: a monitor update key is only deleted once the
+				// full monitor that supersedes it is on VSS. If a monitor write failed, hold
+				// the monitor removes back with it.
+				let monitor_write_failed = failed.iter().any(is_monitor_family);
+				for key in removals {
+					if (monitor_write_failed && is_monitor_family(&key)) || !remove_key(vss, &key) {
+						failed.push(key);
+					}
+				}
+
+				if let Some(snapshot) = manager_snapshot {
+					if failed.iter().any(is_monitor_family) {
+						// Never put a manager on VSS ahead of its monitors.
+						eprintln!(
+							"DualStore: Holding back the manager upload until the failed \
+							 monitor uploads succeed"
+						);
+						failed.push(manager.clone());
+					} else {
+						let (pns, sns, k) = &manager;
+						let ok = match snapshot {
+							Ok(buf) => match KVStoreSync::write(vss, pns, sns, k, buf) {
+								Ok(()) => true,
+								Err(e) => {
+									eprintln!(
+										"DualStore: VSS write failed for the manager \
+										 (local succeeded): {}",
+										e
+									);
+									false
+								},
+							},
+							Err(e) if e.kind() == io::ErrorKind::NotFound => {
+								remove_key(vss, &manager)
+							},
+							Err(e) => {
+								eprintln!(
+									"DualStore: Failed to read the local manager for VSS: {}",
+									e
+								);
+								false
+							},
+						};
+						if !ok {
+							failed.push(manager.clone());
+						}
+					}
+				}
+			},
+			PushVerdict::Undetermined => {
+				eprintln!("DualStore: VSS uploads waiting — push safety not yet determined");
+			},
+			PushVerdict::Disabled => {
+				// The CRITICAL line logged at verdict time explains why. Drop the keys:
+				// nothing may be pushed this session.
+				let mut state = queue.state.lock().unwrap_or_else(|p| p.into_inner());
+				state.dirty.clear();
+				state.startup_logged = true;
+			},
+		}
+
+		let retry = !failed.is_empty() || verdict == PushVerdict::Undetermined;
+		let shutting_down = {
+			let mut state = queue.state.lock().unwrap_or_else(|p| p.into_inner());
+			state.dirty.extend(failed);
+			if state.dirty.is_empty() && !state.startup_logged {
+				state.startup_logged = true;
+				eprintln!(
+					"DualStore: Background bulk sync complete — {}/{} keys synced to VSS \
+					 in {:.1}s",
+					state.startup_total,
+					state.startup_total,
+					state.startup_started.elapsed().as_secs_f64()
+				);
+			}
+			if retry && state.shutdown {
+				eprintln!(
+					"DualStore: Stopping the VSS worker with {} key(s) not on VSS; \
+					 the next startup sync uploads them",
+					state.dirty.len()
+				);
+				state.exited = true;
+				queue.wake.notify_all();
+				return;
+			}
+			queue.wake.notify_all();
+			state.shutdown
+		};
+
+		backoff = if retry {
+			(backoff * 2).clamp(RETRY_BACKOFF_MIN, RETRY_BACKOFF_MAX)
+		} else {
+			Duration::ZERO
+		};
+		if retry && !shutting_down {
+			// Wake early on shutdown; new dirty keys wait out the backoff.
+			let state = queue.state.lock().unwrap_or_else(|p| p.into_inner());
+			let _ = queue.wake.wait_timeout_while(state, backoff, |s| !s.shutdown);
+		}
+	}
+}
+
+impl Drop for DualStore {
+	/// Let the worker upload its remaining dirty keys, bounded by [`FLUSH_ON_DROP`].
+	fn drop(&mut self) {
+		self.mirror.shutdown_and_wait(FLUSH_ON_DROP);
 	}
 }
 
@@ -407,40 +660,12 @@ impl KVStoreSync for DualStore {
 			primary_namespace,
 			secondary_namespace,
 			key,
-			buf.clone(),
+			buf,
 		)?;
 
-		// Write to VSS in background (fire-and-forget).
-		// VssStore retries for up to 180s — we must not block the caller.
-		let vss = Arc::clone(&self.vss);
-		let local = Arc::clone(&self.local);
-		let gate = Arc::clone(&self.push_gate);
-		let pns = primary_namespace.to_string();
-		let sns = secondary_namespace.to_string();
-		let k = key.to_string();
-		std::thread::Builder::new()
-			.name("dual-store-vss-write".to_string())
-			.spawn(move || match vss_push_verdict(&gate, &local, &vss) {
-				PushVerdict::Allowed => {
-					if let Err(e) = KVStoreSync::write(vss.as_ref(), &pns, &sns, &k, buf) {
-						eprintln!(
-							"DualStore: VSS write failed for {}/{}/{} (local succeeded): {}",
-							pns, sns, k, e
-						);
-					}
-				},
-				PushVerdict::Undetermined => {
-					eprintln!(
-						"DualStore: VSS write skipped for {}/{}/{} (push safety not yet determined)",
-						pns, sns, k
-					);
-				},
-				// The CRITICAL line logged at verdict time explains the situation —
-				// stay quiet per key to avoid burying it.
-				PushVerdict::Disabled => {},
-			})
-			.ok();
-
+		// The worker uploads it. Marking before returning is what keeps VSS's monitors ahead
+		// of its manager (module docs).
+		self.mirror.mark_dirty(key_of(primary_namespace, secondary_namespace, key));
 		Ok(())
 	}
 
@@ -456,36 +681,8 @@ impl KVStoreSync for DualStore {
 			lazy,
 		)?;
 
-		// VSS removal in background (fire-and-forget)
-		let vss = Arc::clone(&self.vss);
-		let local = Arc::clone(&self.local);
-		let gate = Arc::clone(&self.push_gate);
-		let pns = primary_namespace.to_string();
-		let sns = secondary_namespace.to_string();
-		let k = key.to_string();
-		std::thread::Builder::new()
-			.name("dual-store-vss-remove".to_string())
-			.spawn(move || match vss_push_verdict(&gate, &local, &vss) {
-				PushVerdict::Allowed => {
-					if let Err(e) = KVStoreSync::remove(vss.as_ref(), &pns, &sns, &k, lazy) {
-						eprintln!(
-							"DualStore: VSS remove failed for {}/{}/{} (local succeeded): {}",
-							pns, sns, k, e
-						);
-					}
-				},
-				PushVerdict::Undetermined => {
-					eprintln!(
-						"DualStore: VSS remove skipped for {}/{}/{} (push safety not yet determined)",
-						pns, sns, k
-					);
-				},
-				// The CRITICAL line logged at verdict time explains the situation —
-				// stay quiet per key to avoid burying it.
-				PushVerdict::Disabled => {},
-			})
-			.ok();
-
+		// The worker finds the key gone locally and removes it from VSS.
+		self.mirror.mark_dirty(key_of(primary_namespace, secondary_namespace, key));
 		Ok(())
 	}
 
@@ -543,5 +740,332 @@ impl KVStore for DualStore {
 	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + Send>> {
 		let result = KVStoreSync::list(self, primary_namespace, secondary_namespace);
 		Box::pin(async move { result })
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::collections::HashMap;
+	use std::sync::atomic::{AtomicUsize, Ordering};
+
+	/// (namespace, key, value written; `None` for a remove)
+	type LogEntry = (String, String, Option<Vec<u8>>);
+
+	/// In-memory store. As the VSS side: `fail_namespace` refuses writes to one primary
+	/// namespace, `fail_lists` makes list calls error, `gate_key` holds uploads of one key
+	/// until `open_gate`, and `log` lists successful writes and removes in order.
+	#[derive(Default)]
+	struct MemStore {
+		data: Mutex<HashMap<Key, Vec<u8>>>,
+		fail_namespace: Mutex<Option<String>>,
+		fail_lists: Mutex<bool>,
+		failed_writes: AtomicUsize,
+		gate_key: Mutex<Option<String>>,
+		gate_cv: Condvar,
+		gate_entered: AtomicUsize,
+		log: Mutex<Vec<LogEntry>>,
+	}
+
+	impl MemStore {
+		fn get(&self, pns: &str, sns: &str, key: &str) -> Option<Vec<u8>> {
+			self.data.lock().unwrap().get(&key_of(pns, sns, key)).cloned()
+		}
+
+		fn put(&self, pns: &str, sns: &str, key: &str, val: &[u8]) {
+			self.data.lock().unwrap().insert(key_of(pns, sns, key), val.to_vec());
+		}
+
+		fn close_gate(&self, key: &str) {
+			*self.gate_key.lock().unwrap() = Some(key.to_string());
+		}
+
+		fn open_gate(&self) {
+			*self.gate_key.lock().unwrap() = None;
+			self.gate_cv.notify_all();
+		}
+
+		/// Position of the first logged write of `key` with `val` (`None` = a remove).
+		fn logged_at(&self, key: &str, val: Option<&[u8]>) -> Option<usize> {
+			self.log
+				.lock()
+				.unwrap()
+				.iter()
+				.position(|(_, k, v)| k == key && v.as_deref() == val)
+		}
+	}
+
+	impl KVStoreSync for MemStore {
+		fn read(&self, pns: &str, sns: &str, key: &str) -> io::Result<Vec<u8>> {
+			self.get(pns, sns, key)
+				.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "mem: not found"))
+		}
+
+		fn write(&self, pns: &str, sns: &str, key: &str, buf: Vec<u8>) -> io::Result<()> {
+			if self.fail_namespace.lock().unwrap().as_deref() == Some(pns) {
+				self.failed_writes.fetch_add(1, Ordering::SeqCst);
+				return Err(io::Error::new(io::ErrorKind::Other, "mem: write refused"));
+			}
+			{
+				let mut gate = self.gate_key.lock().unwrap();
+				if gate.as_deref() == Some(key) {
+					self.gate_entered.fetch_add(1, Ordering::SeqCst);
+					while gate.as_deref() == Some(key) {
+						gate = self.gate_cv.wait(gate).unwrap();
+					}
+				}
+			}
+			self.log.lock().unwrap().push((pns.to_string(), key.to_string(), Some(buf.clone())));
+			self.data.lock().unwrap().insert(key_of(pns, sns, key), buf);
+			Ok(())
+		}
+
+		fn remove(&self, pns: &str, sns: &str, key: &str, _lazy: bool) -> io::Result<()> {
+			self.log.lock().unwrap().push((pns.to_string(), key.to_string(), None));
+			self.data.lock().unwrap().remove(&key_of(pns, sns, key));
+			Ok(())
+		}
+
+		fn list(&self, pns: &str, sns: &str) -> io::Result<Vec<String>> {
+			if *self.fail_lists.lock().unwrap() {
+				return Err(io::Error::new(io::ErrorKind::Other, "mem: unreachable"));
+			}
+			Ok(self
+				.data
+				.lock()
+				.unwrap()
+				.keys()
+				.filter(|(p, s, _)| p == pns && s == sns)
+				.map(|(_, _, k)| k.clone())
+				.collect())
+		}
+	}
+
+	/// The worker wired as `DualStore` wires it, over in-memory stores.
+	struct Harness {
+		local: Arc<MemStore>,
+		vss: Arc<MemStore>,
+		queue: Arc<MirrorQueue>,
+	}
+
+	impl Harness {
+		/// Push gate open, as after a legitimate restore or once the check passed.
+		fn new() -> Self {
+			Self::with(Arc::new(MemStore::default()), Arc::new(MemStore::default()), Some(true))
+		}
+
+		fn with(local: Arc<MemStore>, vss: Arc<MemStore>, gate: Option<bool>) -> Self {
+			let initial: HashSet<Key> = local.data.lock().unwrap().keys().cloned().collect();
+			let queue = Arc::new(MirrorQueue::new(initial));
+			spawn_mirror_worker(
+				Arc::clone(&local),
+				Arc::clone(&vss),
+				Arc::new(Mutex::new(gate)),
+				Arc::clone(&queue),
+			);
+			Self { local, vss, queue }
+		}
+
+		/// What `DualStore::write` does.
+		fn write(&self, pns: &str, key: &str, val: &[u8]) {
+			self.local.put(pns, "", key, val);
+			self.queue.mark_dirty(key_of(pns, "", key));
+		}
+
+		/// What `DualStore::remove` does.
+		fn remove(&self, pns: &str, key: &str) {
+			self.local.data.lock().unwrap().remove(&key_of(pns, "", key));
+			self.queue.mark_dirty(key_of(pns, "", key));
+		}
+	}
+
+	impl Drop for Harness {
+		fn drop(&mut self) {
+			self.queue.shutdown_and_wait(FLUSH_ON_DROP);
+		}
+	}
+
+	fn wait_until(cond: impl Fn() -> bool) {
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while !cond() {
+			assert!(Instant::now() < deadline, "condition not met within 5s");
+			std::thread::sleep(Duration::from_millis(10));
+		}
+	}
+
+	const MON: &str = CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE;
+	const UPD: &str = CHANNEL_MONITOR_UPDATE_PERSISTENCE_PRIMARY_NAMESPACE;
+
+	/// #10 — a slow older upload must not land after a newer write.
+	#[test]
+	fn newer_write_wins_when_an_older_upload_is_slow() {
+		let h = Harness::new();
+		h.vss.close_gate("mon1");
+		h.write(MON, "mon1", b"v1");
+		wait_until(|| h.vss.gate_entered.load(Ordering::SeqCst) == 1);
+		h.write(MON, "mon1", b"v2");
+		h.vss.open_gate();
+
+		wait_until(|| h.vss.get(MON, "", "mon1").as_deref() == Some(&b"v2"[..]));
+		assert!(h.vss.logged_at("mon1", Some(b"v1")) < h.vss.logged_at("mon1", Some(b"v2")));
+	}
+
+	/// #10 — writes queued behind an in-flight upload are sent once, as the newest value.
+	#[test]
+	fn writes_queued_behind_an_upload_collapse_to_the_newest() {
+		let h = Harness::new();
+		h.vss.close_gate("mon1");
+		h.write(MON, "mon1", b"v1");
+		wait_until(|| h.vss.gate_entered.load(Ordering::SeqCst) == 1);
+		for v in [&b"v2"[..], b"v3", b"v4"] {
+			h.write(MON, "mon1", v);
+		}
+		h.vss.open_gate();
+
+		wait_until(|| h.vss.get(MON, "", "mon1").as_deref() == Some(&b"v4"[..]));
+		let values: Vec<_> = h.vss.log.lock().unwrap().iter().map(|(_, _, v)| v.clone()).collect();
+		assert_eq!(values, vec![Some(b"v1".to_vec()), Some(b"v4".to_vec())]);
+	}
+
+	/// #10 — while a monitor upload fails, the manager must stay off VSS.
+	#[test]
+	fn manager_waits_for_failed_monitor_upload() {
+		let h = Harness::new();
+		*h.vss.fail_namespace.lock().unwrap() = Some(MON.to_string());
+		h.write(MON, "mon1", b"mon-v1");
+		h.write("", "manager", b"mgr-v1");
+		wait_until(|| h.vss.failed_writes.load(Ordering::SeqCst) >= 1);
+		std::thread::sleep(Duration::from_millis(200));
+		assert!(h.vss.get("", "", "manager").is_none(), "manager uploaded ahead of its monitor");
+
+		*h.vss.fail_namespace.lock().unwrap() = None;
+		wait_until(|| h.vss.get("", "", "manager").is_some());
+		let mon = h.vss.logged_at("mon1", Some(b"mon-v1"));
+		assert!(mon < h.vss.logged_at("manager", Some(b"mgr-v1")));
+	}
+
+	/// #10 — within one round the manager goes after the monitor keys.
+	#[test]
+	fn manager_is_uploaded_after_monitor_keys_in_a_round() {
+		let h = Harness::new();
+		h.vss.close_gate("scorer");
+		h.write("", "scorer", b"s");
+		wait_until(|| h.vss.gate_entered.load(Ordering::SeqCst) == 1);
+		h.write("", "manager", b"mgr");
+		h.write(MON, "mon1", b"a");
+		h.write(UPD, "1", b"u1");
+		h.vss.open_gate();
+
+		wait_until(|| h.vss.get("", "", "manager").is_some());
+		let mgr = h.vss.logged_at("manager", Some(b"mgr")).unwrap();
+		assert!(h.vss.logged_at("mon1", Some(b"a")).unwrap() < mgr);
+		assert!(h.vss.logged_at("1", Some(b"u1")).unwrap() < mgr);
+	}
+
+	/// #10 — `MonitorUpdatingPersister` consolidation: the full monitor is rewritten and the
+	/// update keys it supersedes are deleted. VSS must not lose an update key before it holds
+	/// the new full monitor.
+	#[test]
+	fn update_keys_are_removed_only_after_the_full_monitor_is_on_vss() {
+		let h = Harness::new();
+		h.write(MON, "mon1", b"full-v1");
+		h.write(UPD, "7", b"upd-7");
+		wait_until(|| h.vss.get(UPD, "", "7").is_some());
+
+		*h.vss.fail_namespace.lock().unwrap() = Some(MON.to_string());
+		h.write(MON, "mon1", b"full-v2");
+		h.remove(UPD, "7");
+		wait_until(|| h.vss.failed_writes.load(Ordering::SeqCst) >= 1);
+		std::thread::sleep(Duration::from_millis(200));
+		assert!(h.vss.get(UPD, "", "7").is_some(), "update key removed before its full monitor");
+
+		*h.vss.fail_namespace.lock().unwrap() = None;
+		wait_until(|| h.vss.get(UPD, "", "7").is_none());
+		assert!(h.vss.logged_at("mon1", Some(b"full-v2")) < h.vss.logged_at("7", None));
+	}
+
+	#[test]
+	fn remove_reaches_vss() {
+		let h = Harness::new();
+		h.write("", "scorer", b"s");
+		wait_until(|| h.vss.get("", "", "scorer").is_some());
+		h.remove("", "scorer");
+		wait_until(|| h.vss.get("", "", "scorer").is_none());
+	}
+
+	/// The startup sync uploads every local key, monitors before the manager.
+	#[test]
+	fn startup_sync_uploads_existing_keys_in_order() {
+		let local = Arc::new(MemStore::default());
+		local.put("", "", "manager", b"mgr");
+		local.put(MON, "", "mon1", b"m");
+		let h = Harness::with(local, Arc::new(MemStore::default()), None);
+
+		wait_until(|| h.vss.get("", "", "manager").is_some());
+		assert!(h.vss.logged_at("mon1", Some(b"m")) < h.vss.logged_at("manager", Some(b"mgr")));
+	}
+
+	/// The push safety gate still applies: local has no monitors while VSS has one, so
+	/// nothing may be uploaded this session.
+	#[test]
+	fn poisoned_local_store_uploads_nothing() {
+		let local = Arc::new(MemStore::default());
+		local.put("", "", "manager", b"fresh-manager");
+		let vss = Arc::new(MemStore::default());
+		vss.put(MON, "", "mon1", b"backed-up");
+		vss.put("", "", "manager", b"backed-up-manager");
+		let h = Harness::with(local, vss, None);
+
+		h.write("", "scorer", b"s");
+		std::thread::sleep(Duration::from_millis(300));
+		assert!(h.vss.log.lock().unwrap().is_empty());
+		assert_eq!(h.vss.get("", "", "manager").unwrap(), b"backed-up-manager");
+	}
+
+	/// An undetermined verdict (VSS list fails) keeps the keys dirty until it resolves.
+	#[test]
+	fn undetermined_gate_keeps_keys_until_vss_answers() {
+		let local = Arc::new(MemStore::default());
+		local.put("", "", "manager", b"mgr");
+		let vss = Arc::new(MemStore::default());
+		*vss.fail_lists.lock().unwrap() = true;
+		let h = Harness::with(local, vss, None);
+
+		std::thread::sleep(Duration::from_millis(200));
+		assert!(h.vss.get("", "", "manager").is_none());
+		*h.vss.fail_lists.lock().unwrap() = false;
+		wait_until(|| h.vss.get("", "", "manager").is_some());
+	}
+
+	/// A clean shutdown uploads what is still dirty before returning.
+	#[test]
+	fn shutdown_flushes_dirty_keys() {
+		let h = Harness::new();
+		h.vss.close_gate("mon1");
+		h.write(MON, "mon1", b"v1");
+		wait_until(|| h.vss.gate_entered.load(Ordering::SeqCst) == 1);
+		h.write("", "manager", b"mgr");
+
+		let vss = Arc::clone(&h.vss);
+		let opener = std::thread::spawn(move || {
+			std::thread::sleep(Duration::from_millis(100));
+			vss.open_gate();
+		});
+		h.queue.shutdown_and_wait(FLUSH_ON_DROP);
+		opener.join().unwrap();
+		assert_eq!(h.vss.get(MON, "", "mon1").unwrap(), b"v1");
+		assert_eq!(h.vss.get("", "", "manager").unwrap(), b"mgr");
+	}
+
+	/// Shutdown does not hang on a VSS that keeps failing.
+	#[test]
+	fn shutdown_does_not_wait_forever_on_a_failing_vss() {
+		let h = Harness::new();
+		*h.vss.fail_namespace.lock().unwrap() = Some(MON.to_string());
+		h.write(MON, "mon1", b"v1");
+		wait_until(|| h.vss.failed_writes.load(Ordering::SeqCst) >= 1);
+		let start = Instant::now();
+		h.queue.shutdown_and_wait(FLUSH_ON_DROP);
+		assert!(start.elapsed() < FLUSH_ON_DROP);
 	}
 }
