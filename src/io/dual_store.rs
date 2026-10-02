@@ -46,7 +46,7 @@
 //! **Background bulk sync.** On construction (except in restore mode), every local key is
 //! marked dirty and the same worker uploads them. This catches up anything written while VSS
 //! was down, follows the same ordering, and cannot race a live write. It does not block node
-//! startup. Dropping the store waits up to [`FLUSH_ON_DROP`] for the worker to finish.
+//! startup. Dropping the store waits up to `FLUSH_ON_DROP` for the worker to finish.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -578,7 +578,7 @@ fn run_mirror_worker<L: KVStoreSync, R: KVStoreSync>(
 }
 
 impl Drop for DualStore {
-	/// Let the worker upload its remaining dirty keys, bounded by [`FLUSH_ON_DROP`].
+	/// Let the worker upload its remaining dirty keys, bounded by `FLUSH_ON_DROP`.
 	fn drop(&mut self) {
 		self.mirror.shutdown_and_wait(FLUSH_ON_DROP);
 	}
