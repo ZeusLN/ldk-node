@@ -114,7 +114,10 @@ impl DualStore {
 					eprintln!("DualStore: Local store is empty — entering restore mode (will read from VSS)");
 					true
 				} else {
-					eprintln!("DualStore: Local store has {} keys — normal mode (local-only reads)", keys.len());
+					eprintln!(
+						"DualStore: Local store has {} keys — normal mode (local-only reads)",
+						keys.len()
+					);
 					false
 				}
 			},
@@ -145,7 +148,9 @@ impl DualStore {
 						eprintln!("DualStore: Bulk sync skipped — push safety not yet determined");
 					},
 					PushVerdict::Disabled => {
-						eprintln!("DualStore: Bulk sync skipped — VSS pushes disabled this session");
+						eprintln!(
+							"DualStore: Bulk sync skipped — VSS pushes disabled this session"
+						);
 					},
 				})
 				.expect("Failed to spawn bulk sync thread");
@@ -249,10 +254,7 @@ fn vss_push_verdict(
 			}
 		},
 		Err(e) => {
-			eprintln!(
-				"DualStore: Could not list VSS monitors to verify push safety: {}",
-				e
-			);
+			eprintln!("DualStore: Could not list VSS monitors to verify push safety: {}", e);
 			PushVerdict::Undetermined
 		},
 	}
@@ -329,7 +331,9 @@ fn bulk_sync_to_vss(local: &SqliteStore, vss: &VssStore) {
 	} else {
 		eprintln!(
 			"DualStore: Background bulk sync complete — {}/{} keys synced to VSS in {:.1}s",
-			synced, total, elapsed.as_secs_f64()
+			synced,
+			total,
+			elapsed.as_secs_f64()
 		);
 	}
 }
@@ -484,9 +488,7 @@ impl KVStoreSync for DualStore {
 		Ok(())
 	}
 
-	fn list(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> io::Result<Vec<String>> {
+	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
 		let local_keys =
 			KVStoreSync::list(self.local.as_ref(), primary_namespace, secondary_namespace)?;
 

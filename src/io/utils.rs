@@ -42,6 +42,7 @@ use rand::TryRngCore;
 
 use super::*;
 use crate::chain::ChainSource;
+use crate::closed_channel::ClosedChannelDetails;
 use crate::config::WALLET_KEYS_SEED_LEN;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::io::{
@@ -53,7 +54,6 @@ use crate::logger::{log_error, LdkLogger, Logger};
 use crate::peer_store::PeerStore;
 use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
 use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
-use crate::closed_channel::ClosedChannelDetails;
 use crate::{Error, EventQueue, NodeMetrics, PaymentDetails};
 
 pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_scores_cache";

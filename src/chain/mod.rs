@@ -424,7 +424,10 @@ impl ChainSource {
 				esplora_chain_source.get_scripthash_utxos(script).await
 			},
 			_ => {
-				log_error!(self.logger, "get_scripthash_utxos is only supported with Esplora chain source");
+				log_error!(
+					self.logger,
+					"get_scripthash_utxos is only supported with Esplora chain source"
+				);
 				Err(Error::ConnectionFailed)
 			},
 		}
