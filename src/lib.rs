@@ -308,7 +308,7 @@ impl Node {
 										gossip_sync_logger,
 										"Background sync of RGS gossip data failed: {}",
 										e
-									)
+									);
 								}
 							}
 						}
@@ -1098,7 +1098,7 @@ impl Node {
 		match self.peer_store.remove_peer(&counterparty_node_id) {
 			Ok(()) => {},
 			Err(e) => {
-				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e)
+				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e);
 			},
 		}
 
