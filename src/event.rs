@@ -516,8 +516,7 @@ where
 		closed_channel_store: Arc<ClosedChannelStore>,
 		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
 		om_mailbox: Option<Arc<OnionMessageMailbox>>, runtime: Arc<Runtime>, logger: L,
-		config: Arc<Config>,
-		pending_funding_utxos: Arc<Mutex<HashMap<u128, Vec<OutPoint>>>>,
+		config: Arc<Config>, pending_funding_utxos: Arc<Mutex<HashMap<u128, Vec<OutPoint>>>>,
 		pending_fund_max: Arc<Mutex<HashSet<u128>>>,
 	) -> Self {
 		Self {
@@ -1534,11 +1533,7 @@ where
 				};
 
 				if let Err(e) = self.closed_channel_store.insert(closed_channel) {
-					log_error!(
-						self.logger,
-						"Failed to persist closed channel details: {}",
-						e
-					);
+					log_error!(self.logger, "Failed to persist closed channel details: {}", e);
 				}
 
 				let event = Event::ChannelClosed {

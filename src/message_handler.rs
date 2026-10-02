@@ -69,9 +69,17 @@ where
 		match self {
 			Self::Ignoring => Ok(()), // Should be unreachable!() as the reader will return `None`
 			Self::Liquidity { liquidity_source, logger, .. } => {
-				let result = liquidity_source.liquidity_manager().handle_custom_message(msg.clone(), sender_node_id);
+				let result = liquidity_source
+					.liquidity_manager()
+					.handle_custom_message(msg.clone(), sender_node_id);
 				if let Err(ref e) = result {
-					log_error!(logger, "LSPS message handling failed for peer {}: {}. Raw payload: {}", sender_node_id, e.err, msg.payload);
+					log_error!(
+						logger,
+						"LSPS message handling failed for peer {}: {}. Raw payload: {}",
+						sender_node_id,
+						e.err,
+						msg.payload
+					);
 				}
 				result
 			},

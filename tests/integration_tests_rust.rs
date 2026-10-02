@@ -1429,8 +1429,10 @@ async fn async_payment() {
 
 	node_receiver.stop().unwrap();
 
-	let payment_id =
-		node_sender.bolt12_payment().send_using_amount(&offer, 5_000, None, None, None, None).unwrap();
+	let payment_id = node_sender
+		.bolt12_payment()
+		.send_using_amount(&offer, 5_000, None, None, None, None)
+		.unwrap();
 
 	// Sleep to allow the payment reach a state where the htlc is held and waiting for the receiver to come online.
 	tokio::time::sleep(std::time::Duration::from_millis(3000)).await;

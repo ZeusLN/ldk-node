@@ -100,9 +100,8 @@ impl SqliteStore {
 		})?;
 
 		let mut entries = Vec::new();
-		let rows_iter = stmt
-			.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-			.map_err(|e| {
+		let rows_iter =
+			stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).map_err(|e| {
 				let msg = format!("Failed to retrieve queried rows: {}", e);
 				io::Error::new(io::ErrorKind::Other, msg)
 			})?;
