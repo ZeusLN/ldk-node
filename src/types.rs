@@ -29,13 +29,13 @@ use lightning_net_tokio::SocketDescriptor;
 
 use crate::chain::bitcoind::UtxoSourceClient;
 use crate::chain::ChainSource;
+use crate::closed_channel::ClosedChannelDetails;
 use crate::config::ChannelConfig;
 use crate::data_store::DataStore;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::RuntimeSpawner;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::closed_channel::ClosedChannelDetails;
 use crate::payment::PaymentDetails;
 
 /// A supertrait that requires that a type implements both [`KVStore`] and [`KVStoreSync`] at the

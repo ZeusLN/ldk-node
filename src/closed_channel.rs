@@ -7,8 +7,8 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bitcoin::OutPoint;
 use bitcoin::secp256k1::PublicKey;
+use bitcoin::OutPoint;
 use lightning::events::ClosureReason;
 use lightning::ln::msgs::DecodeError;
 use lightning::ln::types::ChannelId;
@@ -59,9 +59,7 @@ impl Writeable for ClosedChannelDetails {
 }
 
 impl Readable for ClosedChannelDetails {
-	fn read<R: lightning::io::Read>(
-		reader: &mut R,
-	) -> Result<ClosedChannelDetails, DecodeError> {
+	fn read<R: lightning::io::Read>(reader: &mut R) -> Result<ClosedChannelDetails, DecodeError> {
 		let unix_time_secs = SystemTime::now()
 			.duration_since(UNIX_EPOCH)
 			.unwrap_or(Duration::from_secs(0))
@@ -78,10 +76,8 @@ impl Readable for ClosedChannelDetails {
 		});
 
 		let channel_id: ChannelId = channel_id.0.ok_or(DecodeError::InvalidValue)?;
-		let user_channel_id: UserChannelId =
-			user_channel_id.0.ok_or(DecodeError::InvalidValue)?;
-		let closed_at_timestamp: u64 =
-			closed_at_timestamp.0.ok_or(DecodeError::InvalidValue)?;
+		let user_channel_id: UserChannelId = user_channel_id.0.ok_or(DecodeError::InvalidValue)?;
+		let closed_at_timestamp: u64 = closed_at_timestamp.0.ok_or(DecodeError::InvalidValue)?;
 
 		Ok(ClosedChannelDetails {
 			channel_id,

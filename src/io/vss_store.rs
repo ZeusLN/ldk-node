@@ -378,9 +378,8 @@ struct VssStoreInner {
 
 impl VssStoreInner {
 	pub(crate) fn new(
-		blocking_client: VssClient<CustomRetryPolicy>,
-		async_client: VssClient<CustomRetryPolicy>, store_id: String,
-		data_encryption_key: [u8; 32], key_obfuscator: KeyObfuscator,
+		blocking_client: VssClient<CustomRetryPolicy>, async_client: VssClient<CustomRetryPolicy>,
+		store_id: String, data_encryption_key: [u8; 32], key_obfuscator: KeyObfuscator,
 	) -> Self {
 		let locks = Mutex::new(HashMap::new());
 		Self {
@@ -423,8 +422,11 @@ impl VssStoreInner {
 		secondary_namespace: &str, key: &str,
 	) -> String {
 		if schema_version == VssSchemaVersion::V1 {
-			let obfuscated_prefix =
-				self.build_obfuscated_prefix(schema_version, primary_namespace, secondary_namespace);
+			let obfuscated_prefix = self.build_obfuscated_prefix(
+				schema_version,
+				primary_namespace,
+				secondary_namespace,
+			);
 			let obfuscated_key = self.key_obfuscator.obfuscate(key);
 			format!("{}#{}", obfuscated_prefix, obfuscated_key)
 		} else {
@@ -439,8 +441,7 @@ impl VssStoreInner {
 	}
 
 	fn build_obfuscated_prefix(
-		&self, schema_version: VssSchemaVersion, primary_namespace: &str,
-		secondary_namespace: &str,
+		&self, schema_version: VssSchemaVersion, primary_namespace: &str, secondary_namespace: &str,
 	) -> String {
 		if schema_version == VssSchemaVersion::V1 {
 			let prefix = format!("{}#{}", primary_namespace, secondary_namespace);
@@ -512,8 +513,12 @@ impl VssStoreInner {
 		check_namespace_key_validity(&primary_namespace, &secondary_namespace, Some(&key), "read")?;
 
 		let schema_version = self.ensure_schema_version(client).await?;
-		let store_key =
-			self.build_obfuscated_key(schema_version, &primary_namespace, &secondary_namespace, &key);
+		let store_key = self.build_obfuscated_key(
+			schema_version,
+			&primary_namespace,
+			&secondary_namespace,
+			&key,
+		);
 		let request = GetObjectRequest { store_id: self.store_id.clone(), key: store_key.clone() };
 		let resp = client.get_object(&request).await.map_err(|e| {
 			let msg = format!(
@@ -537,8 +542,7 @@ impl VssStoreInner {
 		})?;
 
 		let storable_builder = StorableBuilder::new(RandEntropySource);
-		let aad =
-			if schema_version == VssSchemaVersion::V1 { store_key.as_bytes() } else { &[] };
+		let aad = if schema_version == VssSchemaVersion::V1 { store_key.as_bytes() } else { &[] };
 		let decrypted = storable_builder.deconstruct(storable, &self.data_encryption_key, aad)?.0;
 		Ok(decrypted)
 	}
@@ -556,12 +560,15 @@ impl VssStoreInner {
 		)?;
 
 		let schema_version = self.ensure_schema_version(client).await?;
-		let store_key =
-			self.build_obfuscated_key(schema_version, &primary_namespace, &secondary_namespace, &key);
+		let store_key = self.build_obfuscated_key(
+			schema_version,
+			&primary_namespace,
+			&secondary_namespace,
+			&key,
+		);
 		let vss_version = -1;
 		let storable_builder = StorableBuilder::new(RandEntropySource);
-		let aad =
-			if schema_version == VssSchemaVersion::V1 { store_key.as_bytes() } else { &[] };
+		let aad = if schema_version == VssSchemaVersion::V1 { store_key.as_bytes() } else { &[] };
 		let storable =
 			storable_builder.build(buf.to_vec(), vss_version, &self.data_encryption_key, aad);
 		let request = PutObjectRequest {
@@ -602,8 +609,12 @@ impl VssStoreInner {
 		)?;
 
 		let schema_version = self.ensure_schema_version(client).await?;
-		let obfuscated_key =
-			self.build_obfuscated_key(schema_version, &primary_namespace, &secondary_namespace, &key);
+		let obfuscated_key = self.build_obfuscated_key(
+			schema_version,
+			&primary_namespace,
+			&secondary_namespace,
+			&key,
+		);
 
 		let key_value = KeyValue { key: obfuscated_key, version: -1, value: vec![] };
 		self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {

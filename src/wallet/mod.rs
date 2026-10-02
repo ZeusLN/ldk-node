@@ -330,10 +330,7 @@ impl Wallet {
 			tx_builder
 				.drain_wallet()
 				.drain_to(output_script)
-				.add_recipient(
-					change_script,
-					Amount::from_sat(cur_anchor_reserve_sats),
-				)
+				.add_recipient(change_script, Amount::from_sat(cur_anchor_reserve_sats))
 				.fee_rate(fee_rate);
 		} else {
 			tx_builder.drain_wallet().drain_to(output_script).fee_rate(fee_rate);
@@ -352,11 +349,7 @@ impl Wallet {
 		let psbt = match tx_builder.finish() {
 			Ok(psbt) => psbt,
 			Err(err) => {
-				log_error!(
-					self.logger,
-					"Failed to estimate max funding amount: {}",
-					err
-				);
+				log_error!(self.logger, "Failed to estimate max funding amount: {}", err);
 				return Err(err.into());
 			},
 		};
@@ -1066,8 +1059,7 @@ impl WalletKeysManager {
 		use lightning::sign::STATIC_PAYMENT_KEY_COUNT;
 		use lightning::types::features::ChannelTypeFeatures;
 
-		let mut res =
-			Vec::with_capacity(usize::from(STATIC_PAYMENT_KEY_COUNT) * 2);
+		let mut res = Vec::with_capacity(usize::from(STATIC_PAYMENT_KEY_COUNT) * 2);
 		let static_remote_key_features = ChannelTypeFeatures::only_static_remote_key();
 		let mut zero_fee_htlc_features = ChannelTypeFeatures::only_static_remote_key();
 		zero_fee_htlc_features.set_anchors_zero_fee_htlc_tx_required();
@@ -1083,14 +1075,8 @@ impl WalletKeysManager {
 				.expect("Your RNG is busted")
 				.private_key;
 			let pubkey = PublicKey::from_secret_key(&self.secp_ctx, &key);
-			res.push((
-				get_countersigner_payment_script(&static_remote_key_features, &pubkey),
-				key,
-			));
-			res.push((
-				get_countersigner_payment_script(&zero_fee_htlc_features, &pubkey),
-				key,
-			));
+			res.push((get_countersigner_payment_script(&static_remote_key_features, &pubkey), key));
+			res.push((get_countersigner_payment_script(&zero_fee_htlc_features, &pubkey), key));
 		}
 		res
 	}

@@ -1133,7 +1133,12 @@ impl ArcedNodeBuilder {
 		self.inner
 			.read()
 			.unwrap()
-			.build_with_dual_store_and_fixed_headers(*node_entropy, vss_url, store_id, fixed_headers)
+			.build_with_dual_store_and_fixed_headers(
+				*node_entropy,
+				vss_url,
+				store_id,
+				fixed_headers,
+			)
 			.map(Arc::new)
 	}
 
@@ -1746,8 +1751,10 @@ fn build_with_store_internal(
 
 			let liquidity_source = runtime
 				.block_on(async move { liquidity_source_builder.build().await.map(Arc::new) })?;
-			let custom_message_handler =
-				Arc::new(NodeCustomMessageHandler::new_liquidity(Arc::clone(&liquidity_source), Arc::clone(&logger)));
+			let custom_message_handler = Arc::new(NodeCustomMessageHandler::new_liquidity(
+				Arc::clone(&liquidity_source),
+				Arc::clone(&logger),
+			));
 			(Some(liquidity_source), custom_message_handler)
 		} else {
 			(None, Arc::new(NodeCustomMessageHandler::new_ignoring()))
