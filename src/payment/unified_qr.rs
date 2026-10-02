@@ -155,7 +155,13 @@ impl UnifiedQrPayment {
 
 		if let Some(offer) = uri_network_checked.extras.bolt12_offer {
 			let offer = maybe_wrap(offer);
-			match self.bolt12_payment.send(&offer, None, None, route_parameters, payment_timeout_secs) {
+			match self.bolt12_payment.send(
+				&offer,
+				None,
+				None,
+				route_parameters,
+				payment_timeout_secs,
+			) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt12 { payment_id }),
 				// A duplicate payment already exists, so falling back to the BOLT11 invoice
 				// would pay the same offer a second time.
