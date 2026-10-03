@@ -35,7 +35,8 @@
 //! in the batch went through. A monitor update LDK treats as complete was marked dirty inside
 //! `write`, before it returned, so it is in the batch or already on VSS. Monitor-key removes
 //! wait for the batch's monitor writes, so an update key is only deleted once the full
-//! monitor that supersedes it is on VSS.
+//! monitor that supersedes it is on VSS. The worker clears the manager's dirty mark before reading
+//! it, so a manager write that lands after the read marks it again and goes out next round.
 //!
 //! **Push safety gate.** All pushes to VSS (per-key writes, removes, and the bulk sync) are
 //! gated on a per-session safety check: if the local store has no channel monitors (active or
@@ -300,6 +301,9 @@ struct MirrorQueue {
 	state: Mutex<QueueState>,
 	/// Signalled on new dirty keys, on shutdown, and when the worker finishes a round or exits.
 	wake: Condvar,
+	/// Test hook, run once on the worker right after it reads the manager snapshot.
+	#[cfg(test)]
+	after_manager_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 struct QueueState {
@@ -325,6 +329,8 @@ impl MirrorQueue {
 				startup_started: Instant::now(),
 			}),
 			wake: Condvar::new(),
+			#[cfg(test)]
+			after_manager_read: Mutex::new(None),
 		}
 	}
 
@@ -428,7 +434,9 @@ fn run_mirror_worker<L: KVStoreSync, R: KVStoreSync>(
 	let mut backoff = Duration::ZERO;
 
 	loop {
-		// Wait for work, and note whether the manager is dirty.
+		// Wait for work. If the manager is dirty, consume its mark now, before reading it: a
+		// write that lands after this point marks it again and is uploaded next round instead
+		// of being swallowed by the older snapshot.
 		let manager_dirty = {
 			let mut state = queue.state.lock().unwrap_or_else(|p| p.into_inner());
 			while state.dirty.is_empty() && !state.shutdown {
@@ -439,7 +447,7 @@ fn run_mirror_worker<L: KVStoreSync, R: KVStoreSync>(
 				queue.wake.notify_all();
 				return;
 			}
-			state.dirty.contains(&manager)
+			state.dirty.remove(&manager)
 		};
 
 		let mut failed: Vec<Key> = Vec::new();
@@ -453,12 +461,18 @@ fn run_mirror_worker<L: KVStoreSync, R: KVStoreSync>(
 				} else {
 					None
 				};
+				#[cfg(test)]
+				if manager_snapshot.is_some() {
+					if let Some(hook) = queue.after_manager_read.lock().unwrap().take() {
+						hook();
+					}
+				}
 
 				let mut batch: Vec<Key> = {
 					let mut state = queue.state.lock().unwrap_or_else(|p| p.into_inner());
 					let mut taken = std::mem::take(&mut state.dirty);
-					if taken.remove(&manager) && manager_snapshot.is_none() {
-						// Became dirty after the check above: next round.
+					if taken.remove(&manager) {
+						// Written after the snapshot read: upload it next round.
 						state.dirty.insert(manager.clone());
 					}
 					taken.into_iter().collect()
@@ -526,6 +540,9 @@ fn run_mirror_worker<L: KVStoreSync, R: KVStoreSync>(
 			},
 			PushVerdict::Undetermined => {
 				eprintln!("DualStore: VSS uploads waiting — push safety not yet determined");
+				if manager_dirty {
+					failed.push(manager.clone());
+				}
 			},
 			PushVerdict::Disabled => {
 				// The CRITICAL line logged at verdict time explains why. Drop the keys:
@@ -1049,5 +1066,45 @@ mod tests {
 		let start = Instant::now();
 		h.queue.shutdown_and_wait(FLUSH_ON_DROP);
 		assert!(start.elapsed() < FLUSH_ON_DROP);
+	}
+
+	/// A manager write that lands after the worker read its manager snapshot must still reach
+	/// VSS, including when it is the last write before shutdown.
+	#[test]
+	fn manager_written_after_the_snapshot_read_is_not_lost() {
+		use std::sync::mpsc;
+		let h = Harness::new();
+		let (read_tx, read_rx) = mpsc::channel::<()>();
+		let (go_tx, go_rx) = mpsc::channel::<()>();
+		*h.queue.after_manager_read.lock().unwrap() = Some(Box::new(move || {
+			read_tx.send(()).unwrap();
+			go_rx.recv().unwrap();
+		}));
+
+		h.write("", "manager", b"v1");
+		// The worker has read v1 and is paused before taking its batch.
+		read_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+		h.write("", "manager", b"v2");
+		go_tx.send(()).unwrap();
+
+		h.queue.shutdown_and_wait(FLUSH_ON_DROP);
+		assert_eq!(h.vss.get("", "", "manager").unwrap(), b"v2");
+	}
+
+	/// The manager mark consumed before an undetermined push verdict is kept for a later round.
+	#[test]
+	fn manager_mark_survives_an_undetermined_verdict() {
+		// No local monitors, so the gate has to ask VSS, and VSS cannot answer yet.
+		let local = Arc::new(MemStore::default());
+		local.put("", "", "scorer", b"s");
+		let vss = Arc::new(MemStore::default());
+		*vss.fail_lists.lock().unwrap() = true;
+		let h = Harness::with(local, vss, None);
+		h.write("", "manager", b"mgr");
+
+		std::thread::sleep(Duration::from_millis(200));
+		assert!(h.vss.get("", "", "manager").is_none());
+		*h.vss.fail_lists.lock().unwrap() = false;
+		wait_until(|| h.vss.get("", "", "manager").is_some());
 	}
 }
