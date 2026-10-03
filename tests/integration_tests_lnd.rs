@@ -83,7 +83,7 @@ async fn test_lnd() {
 	let lnd_invoice = lnd.create_invoice(100_000_000).await;
 	let parsed_invoice = lightning_invoice::Bolt11Invoice::from_str(&lnd_invoice).unwrap();
 
-	node.bolt11_payment().send(&parsed_invoice, None).unwrap();
+	node.bolt11_payment().send(&parsed_invoice, None, None).unwrap();
 	common::expect_event!(node, PaymentSuccessful);
 	let lnd_listed_invoices = lnd.list_invoices().await;
 	assert_eq!(lnd_listed_invoices.len(), 1);

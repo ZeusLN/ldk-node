@@ -105,7 +105,7 @@ async fn test_cln() {
 		cln_client.invoice(Some(10_000_000), &rand_label, &rand_label, None, None, None).unwrap();
 	let parsed_invoice = Bolt11Invoice::from_str(&cln_invoice.bolt11).unwrap();
 
-	node.bolt11_payment().send(&parsed_invoice, None).unwrap();
+	node.bolt11_payment().send(&parsed_invoice, None, None).unwrap();
 	common::expect_event!(node, PaymentSuccessful);
 	let cln_listed_invoices =
 		cln_client.listinvoices(Some(&rand_label), None, None, None).unwrap().invoices;

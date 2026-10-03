@@ -61,7 +61,7 @@
 //! 	node.event_handled();
 //!
 //! 	let invoice = Bolt11Invoice::from_str("INVOICE_STR").unwrap();
-//! 	node.bolt11_payment().send(&invoice, None).unwrap();
+//! 	node.bolt11_payment().send(&invoice, None, None).unwrap();
 //!
 //! 	node.stop().unwrap();
 //! }
@@ -115,7 +115,6 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
-pub use closed_channel::ClosedChannelDetails;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Amount, OutPoint, WPubkeyHash};
 #[cfg(feature = "uniffi")]
@@ -124,6 +123,7 @@ pub use builder::BuildError;
 #[cfg(not(feature = "uniffi"))]
 pub use builder::NodeBuilder as Builder;
 use chain::ChainSource;
+pub use closed_channel::ClosedChannelDetails;
 use config::{
 	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
 	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
@@ -155,8 +155,8 @@ use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use payment::{
-	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment, WalletUtxo,
-	UnifiedQrPayment,
+	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
+	UnifiedQrPayment, WalletUtxo,
 };
 use peer_store::{PeerInfo, PeerStore};
 use rand::Rng;
@@ -308,7 +308,7 @@ impl Node {
 										gossip_sync_logger,
 										"Background sync of RGS gossip data failed: {}",
 										e
-									)
+									);
 								}
 							}
 						}
@@ -1098,7 +1098,7 @@ impl Node {
 		match self.peer_store.remove_peer(&counterparty_node_id) {
 			Ok(()) => {},
 			Err(e) => {
-				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e)
+				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e);
 			},
 		}
 
@@ -1272,7 +1272,9 @@ impl Node {
 	) -> Result<UserChannelId, Error> {
 		if let Err(err) = may_announce_channel(&self.config) {
 			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
-			return Err(Error::ChannelCreationFailed { message: format!("Node not configured for channel forwarding: {}", err) });
+			return Err(Error::ChannelCreationFailed {
+				message: format!("Node not configured for channel forwarding: {}", err),
+			});
 		}
 
 		self.open_channel_inner(
@@ -1293,7 +1295,12 @@ impl Node {
 		utxos: Vec<OutPoint>,
 	) -> Result<UserChannelId, Error> {
 		let user_channel_id = self.open_channel_inner(
-			node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, false,
+			node_id,
+			address,
+			channel_amount_sats,
+			push_to_counterparty_msat,
+			channel_config,
+			false,
 		)?;
 		self.pending_funding_utxos.lock().unwrap().insert(user_channel_id.0, utxos);
 		Ok(user_channel_id)
@@ -1308,11 +1315,18 @@ impl Node {
 	) -> Result<UserChannelId, Error> {
 		if let Err(err) = may_announce_channel(&self.config) {
 			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
-			return Err(Error::ChannelCreationFailed { message: format!("Node not configured for channel forwarding: {}", err) });
+			return Err(Error::ChannelCreationFailed {
+				message: format!("Node not configured for channel forwarding: {}", err),
+			});
 		}
 
 		let user_channel_id = self.open_channel_inner(
-			node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, true,
+			node_id,
+			address,
+			channel_amount_sats,
+			push_to_counterparty_msat,
+			channel_config,
+			true,
 		)?;
 		self.pending_funding_utxos.lock().unwrap().insert(user_channel_id.0, utxos);
 		Ok(user_channel_id)
@@ -1321,20 +1335,29 @@ impl Node {
 	/// Connect to a node and open a new unannounced channel, funding it with the maximum
 	/// possible amount from the on-chain wallet.
 	pub fn open_channel_fund_max(
-		&self, node_id: PublicKey, address: SocketAddress,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		utxos: Option<Vec<OutPoint>>,
+		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
+		channel_config: Option<ChannelConfig>, utxos: Option<Vec<OutPoint>>,
 	) -> Result<UserChannelId, Error> {
 		let channel_amount_sats = self.estimate_max_channel_amount(&node_id, utxos.as_deref())?;
 		let user_channel_id = if let Some(utxos) = utxos {
 			let ucid = self.open_channel_inner(
-				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, false,
+				node_id,
+				address,
+				channel_amount_sats,
+				push_to_counterparty_msat,
+				channel_config,
+				false,
 			)?;
 			self.pending_funding_utxos.lock().unwrap().insert(ucid.0, utxos);
 			ucid
 		} else {
 			self.open_channel_inner(
-				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, false,
+				node_id,
+				address,
+				channel_amount_sats,
+				push_to_counterparty_msat,
+				channel_config,
+				false,
 			)?
 		};
 		self.pending_fund_max.lock().unwrap().insert(user_channel_id.0);
@@ -1344,25 +1367,36 @@ impl Node {
 	/// Connect to a node and open a new announced channel, funding it with the maximum
 	/// possible amount from the on-chain wallet.
 	pub fn open_announced_channel_fund_max(
-		&self, node_id: PublicKey, address: SocketAddress,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		utxos: Option<Vec<OutPoint>>,
+		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
+		channel_config: Option<ChannelConfig>, utxos: Option<Vec<OutPoint>>,
 	) -> Result<UserChannelId, Error> {
 		if let Err(err) = may_announce_channel(&self.config) {
 			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
-			return Err(Error::ChannelCreationFailed { message: format!("Node not configured for channel forwarding: {}", err) });
+			return Err(Error::ChannelCreationFailed {
+				message: format!("Node not configured for channel forwarding: {}", err),
+			});
 		}
 
 		let channel_amount_sats = self.estimate_max_channel_amount(&node_id, utxos.as_deref())?;
 		let user_channel_id = if let Some(utxos) = utxos {
 			let ucid = self.open_channel_inner(
-				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, true,
+				node_id,
+				address,
+				channel_amount_sats,
+				push_to_counterparty_msat,
+				channel_config,
+				true,
 			)?;
 			self.pending_funding_utxos.lock().unwrap().insert(ucid.0, utxos);
 			ucid
 		} else {
 			self.open_channel_inner(
-				node_id, address, channel_amount_sats, push_to_counterparty_msat, channel_config, true,
+				node_id,
+				address,
+				channel_amount_sats,
+				push_to_counterparty_msat,
+				channel_config,
+				true,
 			)?
 		};
 		self.pending_fund_max.lock().unwrap().insert(user_channel_id.0);
@@ -1399,11 +1433,7 @@ impl Node {
 			return Err(Error::InsufficientFunds);
 		}
 
-		log_info!(
-			self.logger,
-			"Estimated max channel funding amount: {}sats",
-			max_amount,
-		);
+		log_info!(self.logger, "Estimated max channel funding amount: {}sats", max_amount,);
 
 		Ok(max_amount)
 	}
@@ -1927,9 +1957,7 @@ impl Node {
 	///
 	/// [`reset_network_graph`]: Self::reset_network_graph
 	pub fn update_rgs_snapshot(&self) -> Result<u32, Error> {
-		self.runtime.block_on(async {
-			self.gossip_source.update_rgs_snapshot().await
-		})
+		self.runtime.block_on(async { self.gossip_source.update_rgs_snapshot().await })
 	}
 
 	/// Creates a digital ECDSA signature of a message with the node’s secret key.
@@ -1984,9 +2012,7 @@ impl Node {
 		use bitcoin::hashes::Hash;
 		use bitcoin::sighash::SighashCache;
 		use bitcoin::transaction::Version;
-		use bitcoin::{
-			EcdsaSighashType, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
-		};
+		use bitcoin::{EcdsaSighashType, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 		use lightning::ln::chan_utils::get_to_countersigner_keyed_anchor_redeemscript;
 
 		let sweep_addr = sweep_address
@@ -2024,75 +2050,72 @@ impl Node {
 		let logger = Arc::clone(&self.logger);
 
 		// Query Esplora for UTXOs matching our scripts
-		let found_utxos: Vec<(
-			esplora_client::Utxo,
-			ScriptBuf,
-			bitcoin::secp256k1::SecretKey,
-		)> = self.runtime.block_on(async {
-			let mut results = Vec::new();
-			let scripts: Vec<_> = script_to_key.keys().cloned().collect();
-			let mut scanned = 0u64;
-			let mut errors = 0u64;
+		let found_utxos: Vec<(esplora_client::Utxo, ScriptBuf, bitcoin::secp256k1::SecretKey)> =
+			self.runtime.block_on(async {
+				let mut results = Vec::new();
+				let scripts: Vec<_> = script_to_key.keys().cloned().collect();
+				let mut scanned = 0u64;
+				let mut errors = 0u64;
 
-			// Process in batches of 20 for concurrency
-			for chunk in scripts.chunks(20) {
-				let mut join_set = tokio::task::JoinSet::new();
-				for script in chunk {
-					let cs = Arc::clone(&chain_source);
-					let s = script.clone();
-					join_set.spawn(async move {
-						let utxos = cs.get_scripthash_utxos(&s).await;
-						(s, utxos)
-					});
-				}
+				// Process in batches of 20 for concurrency
+				for chunk in scripts.chunks(20) {
+					let mut join_set = tokio::task::JoinSet::new();
+					for script in chunk {
+						let cs = Arc::clone(&chain_source);
+						let s = script.clone();
+						join_set.spawn(async move {
+							let utxos = cs.get_scripthash_utxos(&s).await;
+							(s, utxos)
+						});
+					}
 
-				while let Some(result) = join_set.join_next().await {
-					scanned += 1;
-					match result {
-						Ok((script, Ok(utxos))) => {
-							for utxo in utxos {
-								if let Some(key) = script_to_key.get(&script) {
-									log_info!(
-										logger,
-										"Found UTXO: txid={} vout={} value={}",
-										utxo.txid, utxo.vout, utxo.value
-									);
-									results.push((utxo, script.clone(), *key));
+					while let Some(result) = join_set.join_next().await {
+						scanned += 1;
+						match result {
+							Ok((script, Ok(utxos))) => {
+								for utxo in utxos {
+									if let Some(key) = script_to_key.get(&script) {
+										log_info!(
+											logger,
+											"Found UTXO: txid={} vout={} value={}",
+											utxo.txid,
+											utxo.vout,
+											utxo.value
+										);
+										results.push((utxo, script.clone(), *key));
+									}
 								}
-							}
-						},
-						Ok((_script, Err(e))) => {
-							errors += 1;
-							if errors <= 3 {
-								log_error!(
-									logger,
-									"Esplora scripthash query failed: {}",
-									e
-								);
-							}
-						},
-						Err(e) => {
-							errors += 1;
-							if errors <= 3 {
-								log_error!(logger, "Task join error: {}", e);
-							}
-						},
+							},
+							Ok((_script, Err(e))) => {
+								errors += 1;
+								if errors <= 3 {
+									log_error!(logger, "Esplora scripthash query failed: {}", e);
+								}
+							},
+							Err(e) => {
+								errors += 1;
+								if errors <= 3 {
+									log_error!(logger, "Task join error: {}", e);
+								}
+							},
+						}
+					}
+
+					// Sleep between batches to avoid rate limiting by the Esplora server
+					if sleep_seconds > 0 {
+						tokio::time::sleep(Duration::from_secs(sleep_seconds)).await;
 					}
 				}
 
-				// Sleep between batches to avoid rate limiting by the Esplora server
-				if sleep_seconds > 0 {
-					tokio::time::sleep(Duration::from_secs(sleep_seconds)).await;
-				}
-			}
-
-			log_info!(
-				logger,
-				"Scan complete: checked {} scripts, {} errors, {} UTXOs found",
-				scanned, errors, results.len()
-			);
-			results
-		});
+				log_info!(
+					logger,
+					"Scan complete: checked {} scripts, {} errors, {} UTXOs found",
+					scanned,
+					errors,
+					results.len()
+				);
+				results
+			});
 
 		if found_utxos.is_empty() {
 			log_info!(self.logger, "No recoverable funds found for sweep_remote_closed");
@@ -2144,17 +2167,19 @@ impl Node {
 
 		let tx_out = TxOut { value: total_value - fee, script_pubkey: sweep_addr.script_pubkey() };
 
-		let mut tx =
-			Transaction { version: Version::TWO, lock_time: bitcoin::absolute::LockTime::ZERO, input: tx_ins, output: vec![tx_out] };
+		let mut tx = Transaction {
+			version: Version::TWO,
+			lock_time: bitcoin::absolute::LockTime::ZERO,
+			input: tx_ins,
+			output: vec![tx_out],
+		};
 
 		// Sign each input
 		for (idx, (utxo, script, key)) in found_utxos.iter().enumerate() {
 			let pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, key);
 
 			// Determine if this is P2WPKH or P2WSH (anchor)
-			let wpkh_script = ScriptBuf::new_p2wpkh(
-				&WPubkeyHash::hash(&pubkey.serialize()),
-			);
+			let wpkh_script = ScriptBuf::new_p2wpkh(&WPubkeyHash::hash(&pubkey.serialize()));
 
 			if *script == wpkh_script {
 				// P2WPKH signing
@@ -2171,8 +2196,7 @@ impl Node {
 						Error::WalletOperationFailed
 					})?;
 
-				let msg =
-					bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array());
+				let msg = bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array());
 				let sig = secp.sign_ecdsa(&msg, key);
 
 				let mut sig_bytes = sig.serialize_der().to_vec();
@@ -2183,24 +2207,17 @@ impl Node {
 				tx.input[idx].witness.push(pubkey.serialize().to_vec());
 			} else {
 				// P2WSH anchor output signing
-				let witness_script =
-					get_to_countersigner_keyed_anchor_redeemscript(&pubkey);
+				let witness_script = get_to_countersigner_keyed_anchor_redeemscript(&pubkey);
 
 				let mut sighash_cache = SighashCache::new(&tx);
 				let sighash = sighash_cache
-					.p2wsh_signature_hash(
-						idx,
-						&witness_script,
-						utxo.value,
-						EcdsaSighashType::All,
-					)
+					.p2wsh_signature_hash(idx, &witness_script, utxo.value, EcdsaSighashType::All)
 					.map_err(|e| {
 						log_error!(self.logger, "Failed to compute sighash: {:?}", e);
 						Error::WalletOperationFailed
 					})?;
 
-				let msg =
-					bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array());
+				let msg = bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array());
 				let sig = secp.sign_ecdsa(&msg, key);
 
 				let mut sig_bytes = sig.serialize_der().to_vec();

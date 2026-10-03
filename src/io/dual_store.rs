@@ -27,7 +27,7 @@
 //! gated on a per-session safety check: if the local store has no channel monitors (active or
 //! archived) while VSS holds at least one, the local state is presumed to be a fresh node
 //! built over an existing backup, and every VSS write is disabled for the session to avoid
-//! overwriting the only copy of the real channel state. See [`vss_push_verdict`].
+//! overwriting the only copy of the real channel state. See `vss_push_verdict`.
 //!
 //! **Background bulk sync.** On construction (except in restore mode), a background thread is
 //! spawned that reads every key from local SQLite and writes each one to VSS. This catches up
@@ -90,7 +90,7 @@ pub struct DualStore {
 	/// undetermined (e.g. VSS unreachable during the check): pushes are skipped and the check
 	/// retried on the next push attempt. The mutex also single-flights the check itself, so a
 	/// burst of first pushes doesn't fan out into parallel VSS list calls. See
-	/// [`vss_push_verdict`].
+	/// `vss_push_verdict`.
 	push_gate: Arc<Mutex<Option<bool>>>,
 }
 
@@ -99,7 +99,7 @@ impl DualStore {
 	///
 	/// Unless restore mode is detected (local store empty — nothing to catch up), spawns a
 	/// background thread to bulk-sync all local keys to VSS, subject to the push safety
-	/// check ([`vss_push_verdict`]). This catches up any data written while VSS was
+	/// check (`vss_push_verdict`). This catches up any data written while VSS was
 	/// previously unreachable. The sync does not block construction.
 	pub fn new(vss: VssStore, local: SqliteStore) -> Self {
 		let vss = Arc::new(vss);
@@ -114,7 +114,10 @@ impl DualStore {
 					eprintln!("DualStore: Local store is empty — entering restore mode (will read from VSS)");
 					true
 				} else {
-					eprintln!("DualStore: Local store has {} keys — normal mode (local-only reads)", keys.len());
+					eprintln!(
+						"DualStore: Local store has {} keys — normal mode (local-only reads)",
+						keys.len()
+					);
 					false
 				}
 			},
@@ -145,7 +148,9 @@ impl DualStore {
 						eprintln!("DualStore: Bulk sync skipped — push safety not yet determined");
 					},
 					PushVerdict::Disabled => {
-						eprintln!("DualStore: Bulk sync skipped — VSS pushes disabled this session");
+						eprintln!(
+							"DualStore: Bulk sync skipped — VSS pushes disabled this session"
+						);
 					},
 				})
 				.expect("Failed to spawn bulk sync thread");
@@ -155,7 +160,7 @@ impl DualStore {
 	}
 }
 
-/// Outcome of the push safety check. See [`vss_push_verdict`].
+/// Outcome of the push safety check. See `vss_push_verdict`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PushVerdict {
 	/// Pushing local data to VSS is safe.
@@ -249,10 +254,7 @@ fn vss_push_verdict(
 			}
 		},
 		Err(e) => {
-			eprintln!(
-				"DualStore: Could not list VSS monitors to verify push safety: {}",
-				e
-			);
+			eprintln!("DualStore: Could not list VSS monitors to verify push safety: {}", e);
 			PushVerdict::Undetermined
 		},
 	}
@@ -329,7 +331,9 @@ fn bulk_sync_to_vss(local: &SqliteStore, vss: &VssStore) {
 	} else {
 		eprintln!(
 			"DualStore: Background bulk sync complete — {}/{} keys synced to VSS in {:.1}s",
-			synced, total, elapsed.as_secs_f64()
+			synced,
+			total,
+			elapsed.as_secs_f64()
 		);
 	}
 }
@@ -484,9 +488,7 @@ impl KVStoreSync for DualStore {
 		Ok(())
 	}
 
-	fn list(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> io::Result<Vec<String>> {
+	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
 		let local_keys =
 			KVStoreSync::list(self.local.as_ref(), primary_namespace, secondary_namespace)?;
 

@@ -110,7 +110,10 @@ impl ElectrumChainSource {
 
 		let res = self.sync_onchain_wallet_inner(onchain_wallet).await;
 
-		self.onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res.clone());
+		self.onchain_wallet_sync_status
+			.lock()
+			.unwrap()
+			.propagate_result_to_subscribers(res.clone());
 
 		res
 	}
@@ -202,7 +205,10 @@ impl ElectrumChainSource {
 		let res =
 			self.sync_lightning_wallet_inner(channel_manager, chain_monitor, output_sweeper).await;
 
-		self.lightning_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res.clone());
+		self.lightning_wallet_sync_status
+			.lock()
+			.unwrap()
+			.propagate_result_to_subscribers(res.clone());
 
 		res
 	}
