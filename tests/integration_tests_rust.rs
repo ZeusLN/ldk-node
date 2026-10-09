@@ -2321,3 +2321,21 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 		Some(6)
 	);
 }
+
+#[test]
+fn start_without_reachable_chain_source() {
+	// Nothing listens on port 1, so every fee rate update fails at once.
+	let config = common::random_config(true);
+	common::setup_builder!(builder, config.node_config);
+	let sync_config = EsploraSyncConfig { background_sync_config: None };
+	builder.set_chain_source_esplora("http://127.0.0.1:1".to_string(), Some(sync_config));
+	let node = builder.build(config.node_entropy.into()).unwrap();
+
+	node.start().unwrap();
+	let status = node.status();
+	assert!(status.is_running);
+	assert_eq!(status.latest_fee_rate_cache_update_timestamp, None);
+
+	node.stop().unwrap();
+	assert!(!node.status().is_running);
+}
