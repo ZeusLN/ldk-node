@@ -87,6 +87,13 @@ pub(crate) const BACKGROUND_TASK_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 // The timeout after which we abort a fee rate cache update operation.
 pub(crate) const FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 5;
 
+// After a failed fee rate cache update on startup, the delay before the first retry. The delay
+// doubles on each failed retry, up to `STARTUP_FEE_RATE_RETRY_MAX_DELAY_SECS`.
+pub(crate) const STARTUP_FEE_RATE_RETRY_INITIAL_DELAY_SECS: u64 = 5;
+
+// The longest delay between retries of a fee rate cache update that failed on startup.
+pub(crate) const STARTUP_FEE_RATE_RETRY_MAX_DELAY_SECS: u64 = 60;
+
 // The timeout after which we abort a transaction broadcast operation.
 pub(crate) const TX_BROADCAST_TIMEOUT_SECS: u64 = 5;
 
