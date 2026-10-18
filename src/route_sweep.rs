@@ -95,7 +95,9 @@ pub(crate) fn route_ldk_seed(mnemonic: &Mnemonic) -> Result<[u8; 32], Error> {
 	Ok(master.private_key.secret_bytes())
 }
 
-/// One Route channel's secrets, in VLS order.
+/// One Route channel's secrets, in VLS order. Only the payment key is used to
+/// sweep; the others are kept so the tests can pin every basepoint to vlsd's.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct RouteChannelKeys {
 	pub(crate) funding_key: SecretKey,
 	pub(crate) revocation_base_key: SecretKey,
