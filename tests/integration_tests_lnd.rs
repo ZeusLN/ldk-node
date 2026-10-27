@@ -8,7 +8,7 @@ use std::str::FromStr;
 use bitcoin::hex::DisplayHex;
 use electrsd::corepc_client::client_sync::Auth;
 use electrsd::corepc_node::Client as BitcoindClient;
-use electrum_client::Client as ElectrumClient;
+use electrsd::electrum_client::Client as ElectrumClient;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::bitcoin::Amount;
 use ldk_node::lightning::ln::msgs::SocketAddress;
