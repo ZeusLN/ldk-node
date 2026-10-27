@@ -144,6 +144,7 @@ async fn channel_open_fails_when_funds_insufficient() {
 			120000,
 			None,
 			None,
+			None,
 		)
 	);
 }
