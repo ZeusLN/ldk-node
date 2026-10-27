@@ -102,6 +102,7 @@ pub mod logger;
 mod message_handler;
 pub mod payment;
 mod peer_store;
+mod route_sweep;
 mod runtime;
 mod scoring;
 mod tx_broadcaster;
@@ -2017,14 +2018,62 @@ impl Node {
 	pub fn sweep_remote_closed_outputs(
 		&self, sweep_address: &str, fee_rate_sats_per_vbyte: u64, sleep_seconds: u64,
 	) -> Result<String, Error> {
-		use bitcoin::consensus::encode::serialize_hex;
-		use bitcoin::hashes::Hash;
-		use bitcoin::sighash::SighashCache;
-		use bitcoin::transaction::Version;
-		use bitcoin::{EcdsaSighashType, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
-		use lightning::ln::chan_utils::get_to_countersigner_keyed_anchor_redeemscript;
+		let sweep_addr = self.parse_sweep_address(sweep_address)?;
 
-		let sweep_addr = sweep_address
+		// Get all possible scripts with their signing keys
+		let spks_with_keys =
+			self.keys_manager.possible_v2_counterparty_closed_balance_spks_with_keys();
+
+		self.sweep_scripts_to(spks_with_keys, sweep_addr, fee_rate_sats_per_vbyte, sleep_seconds)
+	}
+
+	/// Sweeps the `to_remote` outputs of ZEUS Route channels that a counterparty force-closed,
+	/// using only the customer's Route mnemonic.
+	///
+	/// A ZEUS Route node signs with VLS (vlsd), not with this node's keys manager, so its
+	/// per-channel payment keys are not among the scripts [`Self::sweep_remote_closed_outputs`]
+	/// scans. This method derives them the way vlsd does (VLS `KeyDerivationStyle::Native`)
+	/// for the Route node's channels numbered `1..=max_channel_dbid` (lnrod's `dbid` counter;
+	/// 1000 when `None`), checks the static_remotekey and anchor `to_remote` script of each,
+	/// and returns a signed transaction sweeping everything found to `sweep_address`.
+	///
+	/// `route_mnemonic` is the 24-word mnemonic of the Route node, with no passphrase, which
+	/// need not be this node's own seed. It is used only to derive these keys and is not
+	/// stored. The scan goes through this node's Esplora chain source, like
+	/// [`Self::sweep_remote_closed_outputs`]; nothing is broadcast.
+	///
+	/// Every dbid up to the bound is scanned. A Route channel's payment script only receives
+	/// funds when the counterparty force-closes, so a run of unused scripts says nothing about
+	/// later channels and the scan cannot stop at a gap.
+	pub fn sweep_route_remote_closed_outputs(
+		&self, route_mnemonic: bip39::Mnemonic, sweep_address: &str, fee_rate_sats_per_vbyte: u64,
+		sleep_seconds: u64, max_channel_dbid: Option<u32>,
+	) -> Result<String, Error> {
+		let sweep_addr = self.parse_sweep_address(sweep_address)?;
+		let ldk_seed = route_sweep::route_ldk_seed(&route_mnemonic).map_err(|e| {
+			log_error!(
+				self.logger,
+				"Route mnemonic must have {} words",
+				route_sweep::ROUTE_MNEMONIC_WORDS
+			);
+			e
+		})?;
+		let max_dbid = max_channel_dbid.unwrap_or(route_sweep::ROUTE_DEFAULT_MAX_DBID);
+		if max_dbid == 0 {
+			return Err(Error::InvalidAmount);
+		}
+		let spks_with_keys =
+			route_sweep::route_counterparty_closed_spks_with_keys(&ldk_seed, max_dbid);
+		log_info!(
+			self.logger,
+			"Scanning Route channels 1..={} for counterparty force closes",
+			max_dbid
+		);
+		self.sweep_scripts_to(spks_with_keys, sweep_addr, fee_rate_sats_per_vbyte, sleep_seconds)
+	}
+
+	fn parse_sweep_address(&self, sweep_address: &str) -> Result<Address, Error> {
+		sweep_address
 			.parse::<Address<bitcoin::address::NetworkUnchecked>>()
 			.map_err(|_| {
 				log_error!(self.logger, "Invalid sweep address: {}", sweep_address);
@@ -2038,11 +2087,22 @@ impl Node {
 					sweep_address
 				);
 				Error::InvalidAddress
-			})?;
+			})
+	}
 
-		// Get all possible scripts with their signing keys
-		let spks_with_keys =
-			self.keys_manager.possible_v2_counterparty_closed_balance_spks_with_keys();
+	/// Scans Esplora for UTXOs on `spks_with_keys` and returns a signed transaction sweeping
+	/// them all to `sweep_addr`. Each script is a P2WPKH or the anchor `to_remote` P2WSH of
+	/// its key.
+	fn sweep_scripts_to(
+		&self, spks_with_keys: Vec<(bitcoin::ScriptBuf, bitcoin::secp256k1::SecretKey)>,
+		sweep_addr: Address, fee_rate_sats_per_vbyte: u64, sleep_seconds: u64,
+	) -> Result<String, Error> {
+		use bitcoin::consensus::encode::serialize_hex;
+		use bitcoin::hashes::Hash;
+		use bitcoin::sighash::SighashCache;
+		use bitcoin::transaction::Version;
+		use bitcoin::{EcdsaSighashType, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+		use lightning::ln::chan_utils::get_to_countersigner_keyed_anchor_redeemscript;
 
 		// Build a map from script -> signing key for quick lookup
 		let script_to_key: std::collections::HashMap<ScriptBuf, bitcoin::secp256k1::SecretKey> =
