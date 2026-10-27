@@ -18,12 +18,44 @@ use crate::logger::{log_error, log_info, LdkLogger};
 use crate::types::PeerManager;
 use crate::Error;
 
+type PendingConnections =
+	Mutex<HashMap<PublicKey, Vec<tokio::sync::oneshot::Sender<Result<(), Error>>>>>;
+
+struct PendingConnectionGuard<'a> {
+	pending_connections: &'a PendingConnections,
+	node_id: PublicKey,
+	active: bool,
+}
+
+impl<'a> PendingConnectionGuard<'a> {
+	fn new(pending_connections: &'a PendingConnections, node_id: PublicKey) -> Self {
+		Self { pending_connections, node_id, active: true }
+	}
+
+	fn disarm(&mut self) {
+		self.active = false;
+	}
+}
+
+impl Drop for PendingConnectionGuard<'_> {
+	fn drop(&mut self) {
+		if !self.active {
+			return;
+		}
+		let mut pending_connections = self.pending_connections.lock().unwrap();
+		if let Some(subscribers) = pending_connections.remove(&self.node_id) {
+			for subscriber in subscribers {
+				let _ = subscriber.send(Err(Error::ConnectionFailed));
+			}
+		}
+	}
+}
+
 pub(crate) struct ConnectionManager<L: Deref + Clone + Sync + Send>
 where
 	L::Target: LdkLogger,
 {
-	pending_connections:
-		Mutex<HashMap<PublicKey, Vec<tokio::sync::oneshot::Sender<Result<(), Error>>>>>,
+	pending_connections: PendingConnections,
 	peer_manager: Arc<PeerManager>,
 	logger: L,
 }
@@ -62,19 +94,31 @@ where
 			})?;
 		}
 
+		// If this task is cancelled before it finishes (e.g., when the node is stopped and its
+		// background tasks are aborted), the guard clears the pending state and fails any
+		// subscribers, so they and later attempts don't wait forever.
+		let mut pending_connection =
+			PendingConnectionGuard::new(&self.pending_connections, node_id);
+		let res = self.do_connect_peer_internal(node_id, addr).await;
+		self.propagate_result_to_subscribers(&node_id, res);
+		pending_connection.disarm();
+		res
+	}
+
+	async fn do_connect_peer_internal(
+		&self, node_id: PublicKey, addr: SocketAddress,
+	) -> Result<(), Error> {
 		log_info!(self.logger, "Connecting to peer: {}@{}", node_id, addr);
 
 		let socket_addr = addr
 			.to_socket_addrs()
 			.map_err(|e| {
 				log_error!(self.logger, "Failed to resolve network address {}: {}", addr, e);
-				self.propagate_result_to_subscribers(&node_id, Err(Error::InvalidSocketAddress));
 				Error::InvalidSocketAddress
 			})?
 			.next()
 			.ok_or_else(|| {
 				log_error!(self.logger, "Failed to resolve network address {}", addr);
-				self.propagate_result_to_subscribers(&node_id, Err(Error::InvalidSocketAddress));
 				Error::InvalidSocketAddress
 			})?;
 
@@ -84,7 +128,7 @@ where
 			socket_addr,
 		);
 
-		let res = match connection_future.await {
+		match connection_future.await {
 			Some(connection_closed_future) => {
 				let mut connection_closed_future = Box::pin(connection_closed_future);
 				loop {
@@ -106,11 +150,7 @@ where
 				log_error!(self.logger, "Failed to connect to peer: {}@{}", node_id, addr);
 				Err(Error::ConnectionFailed)
 			},
-		};
-
-		self.propagate_result_to_subscribers(&node_id, res);
-
-		res
+		}
 	}
 
 	fn register_or_subscribe_pending_connection(
@@ -120,6 +160,7 @@ where
 		match pending_connections_lock.entry(*node_id) {
 			hash_map::Entry::Occupied(mut entry) => {
 				let (tx, rx) = tokio::sync::oneshot::channel();
+				entry.get_mut().retain(|subscriber| !subscriber.is_closed());
 				entry.get_mut().push(tx);
 				Some(rx)
 			},
@@ -136,11 +177,6 @@ where
 		if let Some(connection_ready_senders) = pending_connections_lock.remove(node_id) {
 			for sender in connection_ready_senders {
 				let _ = sender.send(res).map_err(|e| {
-					debug_assert!(
-						false,
-						"Failed to send connection result to subscribers: {:?}",
-						e
-					);
 					log_error!(
 						self.logger,
 						"Failed to send connection result to subscribers: {:?}",
@@ -149,5 +185,28 @@ where
 				});
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn pending_connection_guard_notifies_subscribers_when_abandoned() {
+		let node_id: PublicKey =
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".parse().unwrap();
+		let pending_connections = Mutex::new(HashMap::new());
+		let (sender, mut receiver) = tokio::sync::oneshot::channel();
+		pending_connections.lock().unwrap().insert(node_id, vec![sender]);
+
+		let connection_guard = PendingConnectionGuard::new(&pending_connections, node_id);
+		drop(connection_guard);
+
+		assert!(
+			pending_connections.lock().unwrap().is_empty(),
+			"abandoned connection attempt should remove pending state"
+		);
+		assert_eq!(receiver.try_recv(), Ok(Err(Error::ConnectionFailed)));
 	}
 }
