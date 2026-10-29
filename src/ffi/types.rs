@@ -59,7 +59,7 @@ pub use crate::payment::store::{
 	ConfirmationStatus, LSPFeeLimits, PaymentDirection, PaymentKind, PaymentStatus,
 };
 pub use crate::payment::{QrPaymentResult, RouteHints};
-use crate::{hex_utils, SocketAddress, UniffiCustomTypeConverter, UserChannelId};
+use crate::{AccountId, hex_utils, SocketAddress, UniffiCustomTypeConverter, UserChannelId};
 
 impl UniffiCustomTypeConverter for PublicKey {
 	type Builtin = String;
@@ -738,6 +738,18 @@ impl UniffiCustomTypeConverter for UserChannelId {
 
 	fn from_custom(obj: Self) -> Self::Builtin {
 		obj.0.to_string()
+	}
+}
+
+impl UniffiCustomTypeConverter for AccountId {
+	type Builtin = String;
+
+	fn into_custom(val: Self::Builtin) -> uniffi::Result<Self> {
+		Ok(AccountId(val))
+	}
+
+	fn from_custom(obj: Self) -> Self::Builtin {
+		obj.0
 	}
 }
 
