@@ -139,6 +139,15 @@ pub(crate) fn get_fallback_rate_for_ldk_target(target: LdkConfirmationTarget) ->
 	}
 }
 
+/// Returns whether `fee_rate` may be used as the feerate of a splice we initiate.
+///
+/// It must be at least the floor we apply to our own estimates, as a splice that doesn't confirm
+/// can't be fee-bumped, and fit the `u32` sat/kW feerate LDK takes.
+pub(crate) fn is_valid_splice_fee_rate(fee_rate: FeeRate) -> bool {
+	let sat_per_kwu = fee_rate.to_sat_per_kwu();
+	sat_per_kwu >= FEERATE_FLOOR_SATS_PER_KW as u64 && sat_per_kwu <= u32::MAX as u64
+}
+
 pub(crate) fn get_all_conf_targets() -> [ConfirmationTarget; 10] {
 	[
 		ConfirmationTarget::OnchainPayment,
@@ -189,5 +198,23 @@ pub(crate) fn apply_post_estimation_adjustments(
 			FeeRate::from_sat_per_kwu(slightly_bump)
 		},
 		_ => estimated_rate,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use bitcoin::FeeRate;
+	use lightning::chain::chaininterface::FEERATE_FLOOR_SATS_PER_KW;
+
+	use super::is_valid_splice_fee_rate;
+
+	#[test]
+	fn splice_fee_rate_must_be_within_floor_and_u32() {
+		let floor = FEERATE_FLOOR_SATS_PER_KW as u64;
+		assert!(!is_valid_splice_fee_rate(FeeRate::ZERO));
+		assert!(!is_valid_splice_fee_rate(FeeRate::from_sat_per_kwu(floor - 1)));
+		assert!(is_valid_splice_fee_rate(FeeRate::from_sat_per_kwu(floor)));
+		assert!(is_valid_splice_fee_rate(FeeRate::from_sat_per_kwu(u32::MAX as u64)));
+		assert!(!is_valid_splice_fee_rate(FeeRate::from_sat_per_kwu(u32::MAX as u64 + 1)));
 	}
 }

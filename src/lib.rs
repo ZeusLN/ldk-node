@@ -133,7 +133,9 @@ pub use error::Error as NodeError;
 use error::Error;
 pub use event::Event;
 use event::{EventHandler, EventQueue};
-use fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
+use fee_estimator::{
+	is_valid_splice_fee_rate, ConfirmationTarget, FeeEstimator, OnchainFeeEstimator,
+};
 #[cfg(feature = "uniffi")]
 use ffi::*;
 use ffi::{maybe_map_fee_rate_opt, FfiFeeRate};
@@ -1454,6 +1456,8 @@ impl Node {
 	///
 	/// If `min_fee_rate` is set, it will be used as the feerate for our contribution to the splice
 	/// transaction instead of a feerate estimate retrieved from the configured chain source.
+	/// Returns [`Error::InvalidFeeRate`] if it is below 253 sat/kW, the floor applied to our
+	/// estimates, as a splice that doesn't confirm can't be fee-bumped.
 	///
 	/// # Experimental API
 	///
@@ -1464,6 +1468,16 @@ impl Node {
 		splice_amount_sats: u64, min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
 		let min_fee_rate = maybe_map_fee_rate_opt(min_fee_rate);
+		if let Some(fee_rate) = min_fee_rate {
+			if !is_valid_splice_fee_rate(fee_rate) {
+				log_error!(
+					self.logger,
+					"Failed to splice channel: invalid fee rate of {} sat/kwu",
+					fee_rate.to_sat_per_kwu()
+				);
+				return Err(Error::InvalidFeeRate);
+			}
+		}
 
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
@@ -1577,6 +1591,8 @@ impl Node {
 	///
 	/// If `min_fee_rate` is set, it will be used as the feerate for our contribution to the splice
 	/// transaction instead of a feerate estimate retrieved from the configured chain source.
+	/// Returns [`Error::InvalidFeeRate`] if it is below 253 sat/kW, the floor applied to our
+	/// estimates, as a splice that doesn't confirm can't be fee-bumped.
 	///
 	/// # Experimental API
 	///
@@ -1588,6 +1604,16 @@ impl Node {
 		splice_amount_sats: u64, min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
 		let min_fee_rate = maybe_map_fee_rate_opt(min_fee_rate);
+		if let Some(fee_rate) = min_fee_rate {
+			if !is_valid_splice_fee_rate(fee_rate) {
+				log_error!(
+					self.logger,
+					"Failed to splice channel: invalid fee rate of {} sat/kwu",
+					fee_rate.to_sat_per_kwu()
+				);
+				return Err(Error::InvalidFeeRate);
+			}
+		}
 
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
