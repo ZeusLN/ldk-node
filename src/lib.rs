@@ -136,6 +136,7 @@ use event::{EventHandler, EventQueue};
 use fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 #[cfg(feature = "uniffi")]
 use ffi::*;
+use ffi::{maybe_map_fee_rate_opt, FfiFeeRate};
 use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::write_node_metrics;
@@ -1451,14 +1452,19 @@ impl Node {
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
 	///
+	/// If `min_fee_rate` is set, it will be used as the feerate for our contribution to the splice
+	/// transaction instead of a feerate estimate retrieved from the configured chain source.
+	///
 	/// # Experimental API
 	///
 	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
 	/// this classification may change in the future.
 	pub fn splice_in(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
-		splice_amount_sats: u64,
+		splice_amount_sats: u64, min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
+		let min_fee_rate = maybe_map_fee_rate_opt(min_fee_rate);
+
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
@@ -1492,7 +1498,9 @@ impl Node {
 				script_pubkey: funding_output.script_pubkey.clone(),
 			};
 
-			let fee_rate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let fee_rate = min_fee_rate.unwrap_or_else(|| {
+				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
+			});
 
 			let inputs = self
 				.wallet
@@ -1567,6 +1575,9 @@ impl Node {
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
 	///
+	/// If `min_fee_rate` is set, it will be used as the feerate for our contribution to the splice
+	/// transaction instead of a feerate estimate retrieved from the configured chain source.
+	///
 	/// # Experimental API
 	///
 	/// This API is experimental. Currently, a splice-out will be marked as an inbound payment if
@@ -1574,8 +1585,10 @@ impl Node {
 	/// in the future.
 	pub fn splice_out(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: &Address,
-		splice_amount_sats: u64,
+		splice_amount_sats: u64, min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
+		let min_fee_rate = maybe_map_fee_rate_opt(min_fee_rate);
+
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
@@ -1596,7 +1609,9 @@ impl Node {
 				}],
 			};
 
-			let fee_rate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let fee_rate = min_fee_rate.unwrap_or_else(|| {
+				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
+			});
 			let funding_feerate_per_kw: u32 = match fee_rate.to_sat_per_kwu().try_into() {
 				Ok(fee_rate) => fee_rate,
 				Err(_) => {

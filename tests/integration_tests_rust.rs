@@ -1040,7 +1040,8 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 			&user_channel_id_a,
 			node_b.node_id(),
 			&address,
-			excessive_splice_out_sats
+			excessive_splice_out_sats,
+			None
 		),
 		Err(NodeError::ChannelSplicingFailed),
 	);
@@ -1050,11 +1051,11 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 	let amount_msat = 400_000_000;
 
 	assert_eq!(
-		node_b.splice_in(&user_channel_id_b, node_b.node_id(), 5_000_000),
+		node_b.splice_in(&user_channel_id_b, node_b.node_id(), 5_000_000, None),
 		Err(NodeError::ChannelSplicingFailed),
 	);
 	assert_eq!(
-		node_b.splice_out(&user_channel_id_b, node_b.node_id(), &address, amount_msat / 1000),
+		node_b.splice_out(&user_channel_id_b, node_b.node_id(), &address, amount_msat / 1000, None),
 		Err(NodeError::ChannelSplicingFailed),
 	);
 	assert_eq!(
@@ -1063,7 +1064,7 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 	);
 
 	// Splice-in funds for Node B so that it has outbound liquidity to make a payment
-	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 4_000_000).unwrap();
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 4_000_000, None).unwrap();
 
 	let txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
@@ -1106,7 +1107,9 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 
 	// Splice-out funds for Node A from the payment sent by Node B
 	let address = node_a.onchain_payment().new_address().unwrap();
-	node_a.splice_out(&user_channel_id_a, node_b.node_id(), &address, amount_msat / 1000).unwrap();
+	node_a
+		.splice_out(&user_channel_id_a, node_b.node_id(), &address, amount_msat / 1000, None)
+		.unwrap();
 
 	let txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
