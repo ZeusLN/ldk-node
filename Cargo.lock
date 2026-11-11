@@ -968,7 +968,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1596,7 +1596,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -1780,7 +1780,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1917,16 +1917,16 @@ dependencies = [
  "esplora-client 0.12.3",
  "ldk-node 0.6.2",
  "libc",
- "lightning 0.2.7",
+ "lightning 0.2.8",
  "lightning-background-processor 0.2.3",
  "lightning-block-sync 0.2.0",
- "lightning-invoice 0.34.1",
- "lightning-liquidity 0.2.7",
+ "lightning-invoice 0.34.2",
+ "lightning-liquidity 0.2.8",
  "lightning-macros 0.2.1",
  "lightning-net-tokio 0.2.0",
- "lightning-persister 0.2.3",
+ "lightning-persister 0.2.8",
  "lightning-rapid-gossip-sync 0.2.3",
- "lightning-transaction-sync 0.2.1",
+ "lightning-transaction-sync 0.2.8",
  "lightning-types 0.3.5",
  "lnd_grpc_rust",
  "log",
@@ -2003,15 +2003,15 @@ dependencies = [
 
 [[package]]
 name = "lightning"
-version = "0.2.7"
-source = "git+https://github.com/ZeusLN/rust-lightning?rev=4e5cba988c52903a8f50186048a6b2c37465f9cc#4e5cba988c52903a8f50186048a6b2c37465f9cc"
+version = "0.2.8"
+source = "git+https://github.com/ZeusLN/rust-lightning?rev=4d46c5623f6e24de04cbd7c027e78fd971bdb6e8#4d46c5623f6e24de04cbd7c027e78fd971bdb6e8"
 dependencies = [
  "bech32",
  "bitcoin",
  "dnssec-prover",
  "hashbrown 0.13.2",
  "libm",
- "lightning-invoice 0.34.1",
+ "lightning-invoice 0.34.2",
  "lightning-macros 0.2.1",
  "lightning-types 0.3.5",
  "musig2",
@@ -2035,13 +2035,13 @@ dependencies = [
 [[package]]
 name = "lightning-background-processor"
 version = "0.2.3"
-source = "git+https://github.com/ZeusLN/rust-lightning?rev=4e5cba988c52903a8f50186048a6b2c37465f9cc#4e5cba988c52903a8f50186048a6b2c37465f9cc"
+source = "git+https://github.com/ZeusLN/rust-lightning?rev=4d46c5623f6e24de04cbd7c027e78fd971bdb6e8#4d46c5623f6e24de04cbd7c027e78fd971bdb6e8"
 dependencies = [
  "bitcoin",
  "bitcoin-io",
  "bitcoin_hashes",
- "lightning 0.2.7",
- "lightning-liquidity 0.2.7",
+ "lightning 0.2.8",
+ "lightning-liquidity 0.2.8",
  "lightning-rapid-gossip-sync 0.2.3",
  "possiblyrandom 0.2.1",
 ]
@@ -2062,11 +2062,11 @@ dependencies = [
 [[package]]
 name = "lightning-block-sync"
 version = "0.2.0"
-source = "git+https://github.com/ZeusLN/rust-lightning?rev=4e5cba988c52903a8f50186048a6b2c37465f9cc#4e5cba988c52903a8f50186048a6b2c37465f9cc"
+source = "git+https://github.com/ZeusLN/rust-lightning?rev=4d46c5623f6e24de04cbd7c027e78fd971bdb6e8#4d46c5623f6e24de04cbd7c027e78fd971bdb6e8"
 dependencies = [
  "bitcoin",
  "chunked_transfer",
- "lightning 0.2.7",
+ "lightning 0.2.8",
  "serde_json",
  "tokio",
 ]
@@ -2085,8 +2085,8 @@ dependencies = [
 
 [[package]]
 name = "lightning-invoice"
-version = "0.34.1"
-source = "git+https://github.com/ZeusLN/rust-lightning?rev=4e5cba988c52903a8f50186048a6b2c37465f9cc#4e5cba988c52903a8f50186048a6b2c37465f9cc"
+version = "0.34.2"
+source = "git+https://github.com/ZeusLN/rust-lightning?rev=4d46c5623f6e24de04cbd7c027e78fd971bdb6e8#4d46c5623f6e24de04cbd7c027e78fd971bdb6e8"
 dependencies = [
  "bech32",
  "bitcoin",
@@ -2111,13 +2111,13 @@ dependencies = [
 
 [[package]]
 name = "lightning-liquidity"
-version = "0.2.7"
-source = "git+https://github.com/ZeusLN/rust-lightning?rev=4e5cba988c52903a8f50186048a6b2c37465f9cc#4e5cba988c52903a8f50186048a6b2c37465f9cc"
+version = "0.2.8"
+source = "git+https://github.com/ZeusLN/rust-lightning?rev=4d46c5623f6e24de04cbd7c027e78fd971bdb6e8#4d46c5623f6e24de04cbd7c027e78fd971bdb6e8"
 dependencies = [
  "bitcoin",
  "chrono",
- "lightning 0.2.7",
- "lightning-invoice 0.34.1",
+ "lightning 0.2.8",
+ "lightning-invoice 0.34.2",
  "lightning-macros 0.2.1",
  "lightning-types 0.3.5",
  "serde",
@@ -2138,7 +2138,7 @@ dependencies = [
 [[package]]
 name = "lightning-macros"
 version = "0.2.1"
-source = "git+https://github.com/ZeusLN/rust-lightning?rev=4e5cba988c52903a8f50186048a6b2c37465f9cc#4e5cba988c52903a8f50186048a6b2c37465f9cc"
+source = "git+https://github.com/ZeusLN/rust-lightning?rev=4d46c5623f6e24de04cbd7c027e78fd971bdb6e8#4d46c5623f6e24de04cbd7c027e78fd971bdb6e8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2159,10 +2159,10 @@ dependencies = [
 [[package]]
 name = "lightning-net-tokio"
 version = "0.2.0"
-source = "git+https://github.com/ZeusLN/rust-lightning?rev=4e5cba988c52903a8f50186048a6b2c37465f9cc#4e5cba988c52903a8f50186048a6b2c37465f9cc"
+source = "git+https://github.com/ZeusLN/rust-lightning?rev=4d46c5623f6e24de04cbd7c027e78fd971bdb6e8#4d46c5623f6e24de04cbd7c027e78fd971bdb6e8"
 dependencies = [
  "bitcoin",
- "lightning 0.2.7",
+ "lightning 0.2.8",
  "tokio",
 ]
 
@@ -2179,11 +2179,11 @@ dependencies = [
 
 [[package]]
 name = "lightning-persister"
-version = "0.2.3"
-source = "git+https://github.com/ZeusLN/rust-lightning?rev=4e5cba988c52903a8f50186048a6b2c37465f9cc#4e5cba988c52903a8f50186048a6b2c37465f9cc"
+version = "0.2.8"
+source = "git+https://github.com/ZeusLN/rust-lightning?rev=4d46c5623f6e24de04cbd7c027e78fd971bdb6e8#4d46c5623f6e24de04cbd7c027e78fd971bdb6e8"
 dependencies = [
  "bitcoin",
- "lightning 0.2.7",
+ "lightning 0.2.8",
  "tokio",
  "windows-sys 0.48.0",
 ]
@@ -2203,12 +2203,12 @@ dependencies = [
 [[package]]
 name = "lightning-rapid-gossip-sync"
 version = "0.2.3"
-source = "git+https://github.com/ZeusLN/rust-lightning?rev=4e5cba988c52903a8f50186048a6b2c37465f9cc#4e5cba988c52903a8f50186048a6b2c37465f9cc"
+source = "git+https://github.com/ZeusLN/rust-lightning?rev=4d46c5623f6e24de04cbd7c027e78fd971bdb6e8#4d46c5623f6e24de04cbd7c027e78fd971bdb6e8"
 dependencies = [
  "bitcoin",
  "bitcoin-io",
  "bitcoin_hashes",
- "lightning 0.2.7",
+ "lightning 0.2.8",
 ]
 
 [[package]]
@@ -2227,14 +2227,14 @@ dependencies = [
 
 [[package]]
 name = "lightning-transaction-sync"
-version = "0.2.1"
-source = "git+https://github.com/ZeusLN/rust-lightning?rev=4e5cba988c52903a8f50186048a6b2c37465f9cc#4e5cba988c52903a8f50186048a6b2c37465f9cc"
+version = "0.2.8"
+source = "git+https://github.com/ZeusLN/rust-lightning?rev=4d46c5623f6e24de04cbd7c027e78fd971bdb6e8#4d46c5623f6e24de04cbd7c027e78fd971bdb6e8"
 dependencies = [
  "bitcoin",
  "electrum-client 0.24.2",
  "esplora-client 0.12.3",
  "futures",
- "lightning 0.2.7",
+ "lightning 0.2.8",
  "lightning-macros 0.2.1",
 ]
 
@@ -2250,7 +2250,7 @@ dependencies = [
 [[package]]
 name = "lightning-types"
 version = "0.3.5"
-source = "git+https://github.com/ZeusLN/rust-lightning?rev=4e5cba988c52903a8f50186048a6b2c37465f9cc#4e5cba988c52903a8f50186048a6b2c37465f9cc"
+source = "git+https://github.com/ZeusLN/rust-lightning?rev=4d46c5623f6e24de04cbd7c027e78fd971bdb6e8#4d46c5623f6e24de04cbd7c027e78fd971bdb6e8"
 dependencies = [
  "bitcoin",
 ]
@@ -2678,7 +2678,7 @@ dependencies = [
 [[package]]
 name = "possiblyrandom"
 version = "0.2.1"
-source = "git+https://github.com/ZeusLN/rust-lightning?rev=4e5cba988c52903a8f50186048a6b2c37465f9cc#4e5cba988c52903a8f50186048a6b2c37465f9cc"
+source = "git+https://github.com/ZeusLN/rust-lightning?rev=4d46c5623f6e24de04cbd7c027e78fd971bdb6e8#4d46c5623f6e24de04cbd7c027e78fd971bdb6e8"
 dependencies = [
  "getrandom 0.2.17",
 ]
@@ -2923,7 +2923,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.37",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2960,9 +2960,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3254,7 +3254,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3645,7 +3645,7 @@ dependencies = [
  "getrandom 0.4.1",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4536,7 +4536,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
