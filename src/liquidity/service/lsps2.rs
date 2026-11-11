@@ -406,6 +406,7 @@ where
 				opening_fee_msat: _,
 				user_channel_id,
 				intercept_scid: _,
+				max_client_to_self_delay,
 			} => {
 				if self.liquidity_manager.lsps2_service_handler().is_none() {
 					log_error!(self.logger, "Failed to handle LSPS2ServiceEvent as LSPS2 liquidity service was not configured.",);
@@ -493,6 +494,15 @@ where
 				// TODO: revisit this decision eventually.
 				config.channel_config.forwarding_fee_base_msat = 0;
 				config.channel_config.forwarding_fee_proportional_millionths = 0;
+
+				// Don't accept a client `to_self_delay` above the one agreed upon in the opening fee
+				// params. Events persisted before LDK added the field don't carry it, so fall back
+				// to our configured maximum.
+				let max_client_to_self_delay =
+					max_client_to_self_delay.unwrap_or(service_config.max_client_to_self_delay);
+				let their_to_self_delay = &mut config.channel_handshake_limits.their_to_self_delay;
+				*their_to_self_delay =
+					u32::from(*their_to_self_delay).min(max_client_to_self_delay) as u16;
 
 				let result = if service_config.disable_client_reserve {
 					self.channel_manager.create_channel_to_trusted_peer_0reserve(
