@@ -1,3 +1,25 @@
+# Pending
+
+## Feature and API updates
+- `Node::splice_in` and `Node::splice_out` now take an optional `min_fee_rate`. If set, it is
+  used as the feerate for our contribution to the splice transaction instead of a feerate estimate
+  retrieved from the configured chain source. As a splice can't be fee-bumped, a feerate below
+  253 sat/kW or above our current maximum fee estimate is rejected with
+  `NodeError::InvalidFeeRate`. (#1159)
+
+## Bug Fixes and Improvements
+- While a splice is pending, `Node::list_balances` now reports each channel's balance from its
+  newest funding, consistently with `total_lightning_balance_sats`. (#865)
+- `Node::splice_in` and `Node::splice_out` now fail with `NodeError::NotRunning` if the node is
+  not running, instead of queuing a splice that never happens.
+- `Node::splice_in` now fails with `NodeError::InsufficientFunds` instead of
+  `NodeError::ChannelSplicingFailed` if our confirmed funds can't cover the fee.
+
+## Compatibility Notes
+- The new `min_fee_rate` argument of `Node::splice_in` and `Node::splice_out` is required, so
+  Rust callers and users of the language bindings need to pass it, or `None` to keep using the
+  feerate estimate.
+
 # 0.7.1 - Oct. 12, 2026
 This patch release backports a number of bug fixes and security-relevant hardening.
 
