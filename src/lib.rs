@@ -116,7 +116,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Address, Amount, FeeRate, OutPoint, WPubkeyHash};
+use bitcoin::{Address, Amount, OutPoint, WPubkeyHash};
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
 pub use builder::BuildError;
@@ -1533,7 +1533,7 @@ impl Node {
 				script_pubkey: funding_output.script_pubkey.clone(),
 			};
 
-			let fee_rate = FeeRate::from_sat_per_kwu(funding_feerate_per_kw as u64);
+			let fee_rate = bitcoin::FeeRate::from_sat_per_kwu(funding_feerate_per_kw as u64);
 
 			let inputs = self
 				.wallet
