@@ -1154,7 +1154,7 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 
 /// Returns `node`'s total Lightning balance, asserting that it matches the sum of its
 /// `ClaimableOnChannelClose` balances.
-fn claimable_lightning_balance_sats(node: &Node) -> u64 {
+fn claimable_lightning_balance_sats(node: &ldk_node::Node) -> u64 {
 	let balances = node.list_balances();
 	let claimable_sats: u64 = balances
 		.lightning_balances
