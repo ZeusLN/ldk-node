@@ -1498,6 +1498,10 @@ impl Node {
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		splice_amount_sats: u64, min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().unwrap() {
+			return Err(Error::NotRunning);
+		}
+
 		let funding_feerate_per_kw = self.resolve_splice_fee_rate(min_fee_rate)?;
 
 		let open_channels =
@@ -1614,6 +1618,10 @@ impl Node {
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: &Address,
 		splice_amount_sats: u64, min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().unwrap() {
+			return Err(Error::NotRunning);
+		}
+
 		let funding_feerate_per_kw = self.resolve_splice_fee_rate(min_fee_rate)?;
 
 		let open_channels =

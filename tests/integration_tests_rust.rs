@@ -33,7 +33,7 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	QrPaymentResult,
 };
-use ldk_node::{Builder, DynStore, Event, Node, NodeError};
+use ldk_node::{Builder, DynStore, Event, Node, NodeError, UserChannelId};
 use lightning::chain::chaininterface::FEERATE_FLOOR_SATS_PER_KW;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
@@ -1240,6 +1240,25 @@ async fn splice_channel_with_fee_rate() {
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
 	assert_splice_pays_fee_rate(&node_a, &electrsd.client, txo.txid, fee_rate);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_fails_on_stopped_node() {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let node = setup_node(&chain_source, random_config(true));
+	node.stop().unwrap();
+
+	let user_channel_id = UserChannelId(42);
+	let address = node.onchain_payment().new_address().unwrap();
+	assert_eq!(
+		node.splice_in(&user_channel_id, node.node_id(), 100_000, None),
+		Err(NodeError::NotRunning),
+	);
+	assert_eq!(
+		node.splice_out(&user_channel_id, node.node_id(), &address, 100_000, None),
+		Err(NodeError::NotRunning),
+	);
 }
 
 /// Asserts that the splice transaction `txid` we funded pays `fee_rate`. Our fee is determined from
