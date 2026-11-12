@@ -1120,7 +1120,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let available_splice_out_sat = node_b.list_channels()[0].outbound_capacity_msat / 1000;
 	let splice_out_sat = available_splice_out_sat / 2;
 	assert!(splice_out_sat > 500_000);
-	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat).unwrap();
+	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat, None).unwrap();
 
 	expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
@@ -1142,7 +1142,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	println!("\nA splices in the splice-out payment from B");
 	let splice_in_sat = splice_out_sat;
-	node_a.splice_in(&user_channel_id_a, node_b.node_id(), splice_in_sat).unwrap();
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), splice_in_sat, None).unwrap();
 
 	expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::hashes::Hash;
-use bitcoin::{Address, Amount, ScriptBuf};
+use bitcoin::{Address, Amount, FeeRate, ScriptBuf, Txid};
 use common::logging::{init_log_logger, validate_log_entry, MultiNodeLogger, TestLogWriter};
 use common::{
 	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
@@ -25,6 +25,7 @@ use common::{
 	random_listening_addresses, setup_bitcoind_and_electrsd, setup_builder, setup_node,
 	setup_node_for_async_payments, setup_two_nodes, wait_for_tx, TestChainSource, TestSyncStore,
 };
+use electrsd::electrum_client::ElectrumApi;
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
@@ -32,7 +33,8 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	QrPaymentResult,
 };
-use ldk_node::{Builder, DynStore, Event, NodeError};
+use ldk_node::{Builder, DynStore, Event, Node, NodeError, UserChannelId};
+use lightning::chain::chaininterface::FEERATE_FLOOR_SATS_PER_KW;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
@@ -1040,7 +1042,8 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 			&user_channel_id_a,
 			node_b.node_id(),
 			&address,
-			excessive_splice_out_sats
+			excessive_splice_out_sats,
+			None
 		),
 		Err(NodeError::ChannelSplicingFailed),
 	);
@@ -1050,11 +1053,11 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 	let amount_msat = 400_000_000;
 
 	assert_eq!(
-		node_b.splice_in(&user_channel_id_b, node_b.node_id(), 5_000_000),
+		node_b.splice_in(&user_channel_id_b, node_b.node_id(), 5_000_000, None),
 		Err(NodeError::ChannelSplicingFailed),
 	);
 	assert_eq!(
-		node_b.splice_out(&user_channel_id_b, node_b.node_id(), &address, amount_msat / 1000),
+		node_b.splice_out(&user_channel_id_b, node_b.node_id(), &address, amount_msat / 1000, None),
 		Err(NodeError::ChannelSplicingFailed),
 	);
 	assert_eq!(
@@ -1063,10 +1066,14 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 	);
 
 	// Splice-in funds for Node B so that it has outbound liquidity to make a payment
-	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 4_000_000).unwrap();
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 4_000_000, None).unwrap();
 
 	let txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
+
+	// While the splice is pending, the balance already follows the new funding.
+	assert_eq!(claimable_lightning_balance_sats(&node_b), 4_000_000);
+	claimable_lightning_balance_sats(&node_a);
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
@@ -1106,10 +1113,21 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 
 	// Splice-out funds for Node A from the payment sent by Node B
 	let address = node_a.onchain_payment().new_address().unwrap();
-	node_a.splice_out(&user_channel_id_a, node_b.node_id(), &address, amount_msat / 1000).unwrap();
+	node_a
+		.splice_out(&user_channel_id_a, node_b.node_id(), &address, amount_msat / 1000, None)
+		.unwrap();
 
 	let txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
+
+	let expected_splice_out_fee_sat = 183;
+
+	// While the splice is pending, the balance already follows the new funding.
+	assert_eq!(
+		claimable_lightning_balance_sats(&node_a),
+		4_000_000 - closing_transaction_fee_sat - anchor_output_sat - expected_splice_out_fee_sat
+	);
+	claimable_lightning_balance_sats(&node_b);
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
@@ -1118,8 +1136,6 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
-
-	let expected_splice_out_fee_sat = 183;
 
 	let payments = node_a.list_payments();
 	let payment =
@@ -1136,10 +1152,162 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 	);
 }
 
+/// Returns `node`'s total Lightning balance, asserting that it matches the sum of its
+/// `ClaimableOnChannelClose` balances.
+fn claimable_lightning_balance_sats(node: &ldk_node::Node) -> u64 {
+	let balances = node.list_balances();
+	let claimable_sats: u64 = balances
+		.lightning_balances
+		.iter()
+		.map(|balance| match balance {
+			ldk_node::LightningBalance::ClaimableOnChannelClose { amount_satoshis, .. } => {
+				*amount_satoshis
+			},
+			_ => 0,
+		})
+		.sum();
+	assert_eq!(claimable_sats, balances.total_lightning_balance_sats);
+	claimable_sats
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn splice_channel() {
 	run_splice_channel_test(false).await;
 	run_splice_channel_test(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_channel_with_fee_rate() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(5_000_000),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Ten times the feerate our chain source estimates on regtest, so a splice that ignored the
+	// requested feerate would be easy to tell apart.
+	let fee_rate = FeeRate::from_sat_per_kwu(2_500);
+
+	let address = node_a.onchain_payment().new_address().unwrap();
+
+	// As a splice can't be fee-bumped, a feerate below the floor is refused so it confirms, and one
+	// far above our maximum fee estimate is refused as an overpayment.
+	let below_floor_fee_rate = FeeRate::from_sat_per_kwu(FEERATE_FLOOR_SATS_PER_KW as u64 - 1);
+	let above_max_fee_rate = FeeRate::from_sat_per_kwu(1_000_000);
+	for invalid_fee_rate in [below_floor_fee_rate, above_max_fee_rate] {
+		assert_eq!(
+			node_a.splice_out(
+				&user_channel_id_a,
+				node_b.node_id(),
+				&address,
+				100_000,
+				Some(invalid_fee_rate.into())
+			),
+			Err(NodeError::InvalidFeeRate),
+		);
+		assert_eq!(
+			node_a.splice_in(
+				&user_channel_id_a,
+				node_b.node_id(),
+				100_000,
+				Some(invalid_fee_rate.into())
+			),
+			Err(NodeError::InvalidFeeRate),
+		);
+	}
+
+	node_a
+		.splice_out(&user_channel_id_a, node_b.node_id(), &address, 100_000, Some(fee_rate.into()))
+		.unwrap();
+
+	let txo = expect_splice_pending_event!(node_a, node_b.node_id());
+	expect_splice_pending_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, txo.txid).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	assert_splice_pays_fee_rate(&node_a, &electrsd.client, txo.txid, fee_rate);
+
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 100_000, Some(fee_rate.into())).unwrap();
+
+	let txo = expect_splice_pending_event!(node_a, node_b.node_id());
+	expect_splice_pending_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, txo.txid).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	assert_splice_pays_fee_rate(&node_a, &electrsd.client, txo.txid, fee_rate);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_fails_on_stopped_node() {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let node = setup_node(&chain_source, random_config(true));
+	node.stop().unwrap();
+
+	let user_channel_id = UserChannelId(42);
+	let address = node.onchain_payment().new_address().unwrap();
+	assert_eq!(
+		node.splice_in(&user_channel_id, node.node_id(), 100_000, None),
+		Err(NodeError::NotRunning),
+	);
+	assert_eq!(
+		node.splice_out(&user_channel_id, node.node_id(), &address, 100_000, None),
+		Err(NodeError::NotRunning),
+	);
+}
+
+/// Asserts that the splice transaction `txid` we funded pays `fee_rate`. Our fee is determined from
+/// an estimate of the transaction's weight, which may differ slightly from its actual weight.
+fn assert_splice_pays_fee_rate<E: ElectrumApi>(
+	node: &Node, electrs: &E, txid: Txid, fee_rate: FeeRate,
+) {
+	let payment =
+		node.list_payments().into_iter().find(|p| p.id == PaymentId(txid.to_byte_array())).unwrap();
+	let fee_paid_sat = payment.fee_paid_msat.unwrap() / 1_000;
+	let weight_wu = electrs.transaction_get(&txid).unwrap().weight().to_wu();
+
+	let paid_sat_per_kwu = fee_paid_sat * 1_000 / weight_wu;
+	let requested_sat_per_kwu = fee_rate.to_sat_per_kwu();
+	assert!(
+		paid_sat_per_kwu.abs_diff(requested_sat_per_kwu) <= requested_sat_per_kwu / 100,
+		"paid {} sat/kwu, requested {} sat/kwu",
+		paid_sat_per_kwu,
+		requested_sat_per_kwu
+	);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
