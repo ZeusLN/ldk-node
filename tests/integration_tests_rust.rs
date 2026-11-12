@@ -1181,27 +1181,31 @@ async fn splice_channel_with_fee_rate() {
 
 	let address = node_a.onchain_payment().new_address().unwrap();
 
-	// A feerate below the floor is refused, as a splice that doesn't confirm can't be fee-bumped.
+	// As a splice can't be fee-bumped, a feerate below the floor is refused so it confirms, and one
+	// far above our maximum fee estimate is refused as an overpayment.
 	let below_floor_fee_rate = FeeRate::from_sat_per_kwu(FEERATE_FLOOR_SATS_PER_KW as u64 - 1);
-	assert_eq!(
-		node_a.splice_out(
-			&user_channel_id_a,
-			node_b.node_id(),
-			&address,
-			100_000,
-			Some(below_floor_fee_rate.into())
-		),
-		Err(NodeError::InvalidFeeRate),
-	);
-	assert_eq!(
-		node_a.splice_in(
-			&user_channel_id_a,
-			node_b.node_id(),
-			100_000,
-			Some(below_floor_fee_rate.into())
-		),
-		Err(NodeError::InvalidFeeRate),
-	);
+	let above_max_fee_rate = FeeRate::from_sat_per_kwu(1_000_000);
+	for invalid_fee_rate in [below_floor_fee_rate, above_max_fee_rate] {
+		assert_eq!(
+			node_a.splice_out(
+				&user_channel_id_a,
+				node_b.node_id(),
+				&address,
+				100_000,
+				Some(invalid_fee_rate.into())
+			),
+			Err(NodeError::InvalidFeeRate),
+		);
+		assert_eq!(
+			node_a.splice_in(
+				&user_channel_id_a,
+				node_b.node_id(),
+				100_000,
+				Some(invalid_fee_rate.into())
+			),
+			Err(NodeError::InvalidFeeRate),
+		);
+	}
 
 	node_a
 		.splice_out(&user_channel_id_a, node_b.node_id(), &address, 100_000, Some(fee_rate.into()))

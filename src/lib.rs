@@ -116,7 +116,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Address, Amount, OutPoint, WPubkeyHash};
+use bitcoin::{Address, Amount, FeeRate, OutPoint, WPubkeyHash};
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
 pub use builder::BuildError;
@@ -142,6 +142,9 @@ use ffi::{maybe_map_fee_rate_opt, FfiFeeRate};
 use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::write_node_metrics;
+use lightning::chain::chaininterface::{
+	ConfirmationTarget as LdkConfirmationTarget, FEERATE_FLOOR_SATS_PER_KW,
+};
 use lightning::chain::BestBlock;
 use lightning::events::bump_transaction::{Input, Wallet as LdkWallet};
 use lightning::impl_writeable_tlv_based;
@@ -1448,6 +1451,34 @@ impl Node {
 		Ok(max_amount)
 	}
 
+	/// Returns the feerate, in sat/kW, for a splice we initiate: `min_fee_rate` if set, otherwise
+	/// our [`ConfirmationTarget::ChannelFunding`] estimate.
+	///
+	/// Returns [`Error::InvalidFeeRate`] if `min_fee_rate` is below 253 sat/kW or above our current
+	/// [`LdkConfirmationTarget::MaximumFeeEstimate`].
+	fn resolve_splice_fee_rate(&self, min_fee_rate: Option<FfiFeeRate>) -> Result<u32, Error> {
+		let fee_rate = match maybe_map_fee_rate_opt(min_fee_rate) {
+			Some(fee_rate) => {
+				let max_fee_rate = self
+					.fee_estimator
+					.estimate_fee_rate(LdkConfirmationTarget::MaximumFeeEstimate.into());
+				if !is_valid_splice_fee_rate(fee_rate, max_fee_rate) {
+					log_error!(
+						self.logger,
+						"Failed to splice channel: fee rate of {} sat/kwu is outside {}..={} sat/kwu",
+						fee_rate.to_sat_per_kwu(),
+						FEERATE_FLOOR_SATS_PER_KW,
+						max_fee_rate.to_sat_per_kwu()
+					);
+					return Err(Error::InvalidFeeRate);
+				}
+				fee_rate
+			},
+			None => self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding),
+		};
+		Ok(fee_rate.to_sat_per_kwu().try_into().unwrap_or(u32::MAX))
+	}
+
 	/// Add funds from the on-chain wallet into an existing channel.
 	///
 	/// This provides for increasing a channel's outbound liquidity without re-balancing or closing
@@ -1455,9 +1486,9 @@ impl Node {
 	/// while waiting for a new funding transaction to confirm.
 	///
 	/// If `min_fee_rate` is set, it will be used as the feerate for our contribution to the splice
-	/// transaction instead of a feerate estimate retrieved from the configured chain source.
-	/// Returns [`Error::InvalidFeeRate`] if it is below 253 sat/kW, the floor applied to our
-	/// estimates, as a splice that doesn't confirm can't be fee-bumped.
+	/// transaction instead of a feerate estimate retrieved from the configured chain source. As a
+	/// splice can't be fee-bumped, returns [`Error::InvalidFeeRate`] if it is below 253 sat/kW,
+	/// the floor applied to our estimates, or above our current maximum fee estimate.
 	///
 	/// # Experimental API
 	///
@@ -1467,17 +1498,7 @@ impl Node {
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		splice_amount_sats: u64, min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
-		let min_fee_rate = maybe_map_fee_rate_opt(min_fee_rate);
-		if let Some(fee_rate) = min_fee_rate {
-			if !is_valid_splice_fee_rate(fee_rate) {
-				log_error!(
-					self.logger,
-					"Failed to splice channel: invalid fee rate of {} sat/kwu",
-					fee_rate.to_sat_per_kwu()
-				);
-				return Err(Error::InvalidFeeRate);
-			}
-		}
+		let funding_feerate_per_kw = self.resolve_splice_fee_rate(min_fee_rate)?;
 
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
@@ -1512,9 +1533,7 @@ impl Node {
 				script_pubkey: funding_output.script_pubkey.clone(),
 			};
 
-			let fee_rate = min_fee_rate.unwrap_or_else(|| {
-				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
-			});
+			let fee_rate = FeeRate::from_sat_per_kwu(funding_feerate_per_kw as u64);
 
 			let inputs = self
 				.wallet
@@ -1537,14 +1556,6 @@ impl Node {
 				value: Amount::from_sat(splice_amount_sats),
 				inputs,
 				change_script: Some(change_address.script_pubkey()),
-			};
-
-			let funding_feerate_per_kw: u32 = match fee_rate.to_sat_per_kwu().try_into() {
-				Ok(fee_rate) => fee_rate,
-				Err(_) => {
-					debug_assert!(false);
-					fee_estimator::get_fallback_rate_for_target(ConfirmationTarget::ChannelFunding)
-				},
 			};
 
 			self.channel_manager
@@ -1590,9 +1601,9 @@ impl Node {
 	/// while waiting for a new funding transaction to confirm.
 	///
 	/// If `min_fee_rate` is set, it will be used as the feerate for our contribution to the splice
-	/// transaction instead of a feerate estimate retrieved from the configured chain source.
-	/// Returns [`Error::InvalidFeeRate`] if it is below 253 sat/kW, the floor applied to our
-	/// estimates, as a splice that doesn't confirm can't be fee-bumped.
+	/// transaction instead of a feerate estimate retrieved from the configured chain source. As a
+	/// splice can't be fee-bumped, returns [`Error::InvalidFeeRate`] if it is below 253 sat/kW,
+	/// the floor applied to our estimates, or above our current maximum fee estimate.
 	///
 	/// # Experimental API
 	///
@@ -1603,17 +1614,7 @@ impl Node {
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: &Address,
 		splice_amount_sats: u64, min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
-		let min_fee_rate = maybe_map_fee_rate_opt(min_fee_rate);
-		if let Some(fee_rate) = min_fee_rate {
-			if !is_valid_splice_fee_rate(fee_rate) {
-				log_error!(
-					self.logger,
-					"Failed to splice channel: invalid fee rate of {} sat/kwu",
-					fee_rate.to_sat_per_kwu()
-				);
-				return Err(Error::InvalidFeeRate);
-			}
-		}
+		let funding_feerate_per_kw = self.resolve_splice_fee_rate(min_fee_rate)?;
 
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
@@ -1633,18 +1634,6 @@ impl Node {
 					value: Amount::from_sat(splice_amount_sats),
 					script_pubkey: address.script_pubkey(),
 				}],
-			};
-
-			let fee_rate = min_fee_rate.unwrap_or_else(|| {
-				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
-			});
-			let funding_feerate_per_kw: u32 = match fee_rate.to_sat_per_kwu().try_into() {
-				Ok(fee_rate) => fee_rate,
-				Err(_) => {
-					debug_assert!(false, "FeeRate should always fit within u32");
-					log_error!(self.logger, "FeeRate should always fit within u32");
-					fee_estimator::get_fallback_rate_for_target(ConfirmationTarget::ChannelFunding)
-				},
 			};
 
 			let funding_txo = channel_details.funding_txo.ok_or_else(|| {
