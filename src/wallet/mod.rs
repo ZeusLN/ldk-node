@@ -701,9 +701,11 @@ impl Wallet {
 		Ok(txid)
 	}
 
+	/// Returns [`Error::InsufficientFunds`] if our confirmed UTXOs can't cover `must_pay_to` plus
+	/// the fee at `fee_rate`.
 	pub(crate) fn select_confirmed_utxos(
 		&self, must_spend: Vec<Input>, must_pay_to: &[TxOut], fee_rate: FeeRate,
-	) -> Result<Vec<FundingTxInput>, ()> {
+	) -> Result<Vec<FundingTxInput>, Error> {
 		let mut locked_wallet = self.inner.lock().unwrap();
 		debug_assert!(matches!(
 			locked_wallet.public_descriptor(KeychainKind::External),
@@ -723,7 +725,9 @@ impl Wallet {
 				..Default::default()
 			};
 			let weight = Weight::from_wu(input.satisfaction_weight);
-			tx_builder.add_foreign_utxo(input.outpoint, psbt_input, weight).map_err(|_| ())?;
+			tx_builder
+				.add_foreign_utxo(input.outpoint, psbt_input, weight)
+				.map_err(|_| Error::OnchainTxCreationFailed)?;
 		}
 
 		for output in must_pay_to {
@@ -737,6 +741,7 @@ impl Wallet {
 			.finish()
 			.map_err(|e| {
 				log_error!(self.logger, "Failed to select confirmed UTXOs: {}", e);
+				Error::from(e)
 			})?
 			.unsigned_tx
 			.input
@@ -749,6 +754,7 @@ impl Wallet {
 					.map(|prevtx| FundingTxInput::new_p2wpkh(prevtx, txin.previous_output.vout))
 			})
 			.collect::<Result<Vec<_>, ()>>()
+			.map_err(|()| Error::OnchainTxCreationFailed)
 	}
 
 	fn list_confirmed_utxos_inner(&self) -> Result<Vec<Utxo>, ()> {

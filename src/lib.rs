@@ -1542,12 +1542,20 @@ impl Node {
 			let inputs = self
 				.wallet
 				.select_confirmed_utxos(vec![shared_input], &[shared_output], fee_rate)
-				.map_err(|()| {
-					log_error!(
-						self.logger,
-						"Failed to splice channel: insufficient confirmed UTXOs",
-					);
-					Error::ChannelSplicingFailed
+				.map_err(|e| match e {
+					Error::InsufficientFunds => {
+						log_error!(
+							self.logger,
+							"Failed to splice channel: insufficient confirmed funds to splice in {}sats at {} sat/kwu",
+							splice_amount_sats,
+							funding_feerate_per_kw,
+						);
+						e
+					},
+					_ => {
+						log_error!(self.logger, "Failed to splice channel: unable to select UTXOs");
+						Error::ChannelSplicingFailed
+					},
 				})?;
 
 			// insert channel's funding utxo into the wallet so we can later calculate fees
@@ -1632,6 +1640,12 @@ impl Node {
 			let splice_amount_msat =
 				splice_amount_sats.checked_mul(1_000).ok_or(Error::ChannelSplicingFailed)?;
 			if splice_amount_msat > channel_details.outbound_capacity_msat {
+				log_error!(
+					self.logger,
+					"Failed to splice channel: splice-out of {}sats exceeds outbound capacity of {}msat",
+					splice_amount_sats,
+					channel_details.outbound_capacity_msat,
+				);
 				return Err(Error::ChannelSplicingFailed);
 			}
 
@@ -1665,7 +1679,15 @@ impl Node {
 					None,
 				)
 				.map_err(|e| {
-					log_error!(self.logger, "Failed to splice channel: {:?}", e);
+					// The fee is paid from the channel balance, so a splice-out that fits our
+					// outbound capacity can still be refused once the fee is added.
+					log_error!(
+						self.logger,
+						"Failed to splice out {}sats at {} sat/kwu: {:?}",
+						splice_amount_sats,
+						funding_feerate_per_kw,
+						e
+					);
 					Error::ChannelSplicingFailed
 				})
 		} else {
