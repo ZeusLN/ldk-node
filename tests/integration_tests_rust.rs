@@ -1071,6 +1071,10 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 	let txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
 
+	// While the splice is pending, the balance already follows the new funding.
+	assert_eq!(claimable_lightning_balance_sats(&node_b), 4_000_000);
+	claimable_lightning_balance_sats(&node_a);
+
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
 	node_a.sync_wallets().unwrap();
@@ -1116,6 +1120,15 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 	let txo = expect_splice_pending_event!(node_a, node_b.node_id());
 	expect_splice_pending_event!(node_b, node_a.node_id());
 
+	let expected_splice_out_fee_sat = 183;
+
+	// While the splice is pending, the balance already follows the new funding.
+	assert_eq!(
+		claimable_lightning_balance_sats(&node_a),
+		4_000_000 - closing_transaction_fee_sat - anchor_output_sat - expected_splice_out_fee_sat
+	);
+	claimable_lightning_balance_sats(&node_b);
+
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
 	node_a.sync_wallets().unwrap();
@@ -1123,8 +1136,6 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
-
-	let expected_splice_out_fee_sat = 183;
 
 	let payments = node_a.list_payments();
 	let payment =
@@ -1139,6 +1150,24 @@ async fn run_splice_channel_test(bitcoind_chain_source: bool) {
 		node_a.list_balances().total_lightning_balance_sats,
 		4_000_000 - closing_transaction_fee_sat - anchor_output_sat - expected_splice_out_fee_sat
 	);
+}
+
+/// Returns `node`'s total Lightning balance, asserting that it matches the sum of its
+/// `ClaimableOnChannelClose` balances.
+fn claimable_lightning_balance_sats(node: &Node) -> u64 {
+	let balances = node.list_balances();
+	let claimable_sats: u64 = balances
+		.lightning_balances
+		.iter()
+		.map(|balance| match balance {
+			ldk_node::LightningBalance::ClaimableOnChannelClose { amount_satoshis, .. } => {
+				*amount_satoshis
+			},
+			_ => 0,
+		})
+		.sum();
+	assert_eq!(claimable_sats, balances.total_lightning_balance_sats);
+	claimable_sats
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
