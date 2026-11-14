@@ -13,6 +13,7 @@ use bitcoin::{Address, OutPoint, Txid};
 
 use crate::config::Config;
 use crate::error::Error;
+use crate::ffi::{maybe_map_fee_rate_opt, FfiFeeRate};
 use crate::logger::{log_info, LdkLogger, Logger};
 use crate::types::{ChannelManager, Wallet};
 use crate::wallet::OnchainSendAmount;
@@ -30,24 +31,6 @@ pub struct WalletUtxo {
 	pub address: String,
 	/// Whether the UTXO has been spent.
 	pub is_spent: bool,
-}
-
-#[cfg(not(feature = "uniffi"))]
-type FeeRate = bitcoin::FeeRate;
-#[cfg(feature = "uniffi")]
-type FeeRate = Arc<bitcoin::FeeRate>;
-
-macro_rules! maybe_map_fee_rate_opt {
-	($fee_rate_opt:expr) => {{
-		#[cfg(not(feature = "uniffi"))]
-		{
-			$fee_rate_opt
-		}
-		#[cfg(feature = "uniffi")]
-		{
-			$fee_rate_opt.map(|f| *f)
-		}
-	}};
 }
 
 /// A payment handler allowing to send and receive on-chain payments.
@@ -88,7 +71,7 @@ impl OnchainPayment {
 	///
 	/// [`BalanceDetails::total_anchor_channels_reserve_sats`]: crate::BalanceDetails::total_anchor_channels_reserve_sats
 	pub fn send_to_address(
-		&self, address: &bitcoin::Address, amount_sats: u64, fee_rate: Option<FeeRate>,
+		&self, address: &bitcoin::Address, amount_sats: u64, fee_rate: Option<FfiFeeRate>,
 	) -> Result<Txid, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -98,7 +81,7 @@ impl OnchainPayment {
 			crate::total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 		let send_amount =
 			OnchainSendAmount::ExactRetainingReserve { amount_sats, cur_anchor_reserve_sats };
-		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.wallet.send_to_address(address, send_amount, fee_rate_opt, None)
 	}
 
@@ -118,7 +101,7 @@ impl OnchainPayment {
 	///
 	/// [`BalanceDetails::spendable_onchain_balance_sats`]: crate::balance::BalanceDetails::spendable_onchain_balance_sats
 	pub fn send_all_to_address(
-		&self, address: &bitcoin::Address, retain_reserves: bool, fee_rate: Option<FeeRate>,
+		&self, address: &bitcoin::Address, retain_reserves: bool, fee_rate: Option<FfiFeeRate>,
 	) -> Result<Txid, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -132,7 +115,7 @@ impl OnchainPayment {
 			OnchainSendAmount::AllDrainingReserve
 		};
 
-		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.wallet.send_to_address(address, send_amount, fee_rate_opt, None)
 	}
 
@@ -149,7 +132,7 @@ impl OnchainPayment {
 	/// [`BalanceDetails::total_anchor_channels_reserve_sats`]: crate::BalanceDetails::total_anchor_channels_reserve_sats
 	pub fn send_to_address_with_utxos(
 		&self, address: &bitcoin::Address, amount_sats: u64, utxos: Vec<OutPoint>,
-		fee_rate: Option<FeeRate>,
+		fee_rate: Option<FfiFeeRate>,
 	) -> Result<Txid, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -159,14 +142,14 @@ impl OnchainPayment {
 			crate::total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 		let send_amount =
 			OnchainSendAmount::ExactRetainingReserve { amount_sats, cur_anchor_reserve_sats };
-		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.wallet.send_to_address(address, send_amount, fee_rate_opt, Some(utxos))
 	}
 
 	/// Send all funds from the specified UTXOs to the given address.
 	pub fn send_all_to_address_with_utxos(
 		&self, address: &bitcoin::Address, retain_reserves: bool, utxos: Vec<OutPoint>,
-		fee_rate: Option<FeeRate>,
+		fee_rate: Option<FfiFeeRate>,
 	) -> Result<Txid, Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -180,7 +163,7 @@ impl OnchainPayment {
 			OnchainSendAmount::AllDrainingReserve
 		};
 
-		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.wallet.send_to_address(address, send_amount, fee_rate_opt, Some(utxos))
 	}
 }

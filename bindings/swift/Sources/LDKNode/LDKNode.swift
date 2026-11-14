@@ -2906,9 +2906,9 @@ public protocol NodeProtocol : AnyObject {
     
     func signMessage(msg: [UInt8])  -> String
     
-    func spliceIn(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, spliceAmountSats: UInt64) throws 
+    func spliceIn(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, spliceAmountSats: UInt64, minFeeRate: FeeRate?) throws 
     
-    func spliceOut(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, address: Address, spliceAmountSats: UInt64) throws 
+    func spliceOut(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, address: Address, spliceAmountSats: UInt64, minFeeRate: FeeRate?) throws 
     
     func spontaneousPayment()  -> SpontaneousPayment
     
@@ -3270,21 +3270,23 @@ open func signMessage(msg: [UInt8]) -> String {
 })
 }
     
-open func spliceIn(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, spliceAmountSats: UInt64)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func spliceIn(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, spliceAmountSats: UInt64, minFeeRate: FeeRate?)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
     uniffi_ldk_node_fn_method_node_splice_in(self.uniffiClonePointer(),
         FfiConverterTypeUserChannelId.lower(userChannelId),
         FfiConverterTypePublicKey.lower(counterpartyNodeId),
-        FfiConverterUInt64.lower(spliceAmountSats),$0
+        FfiConverterUInt64.lower(spliceAmountSats),
+        FfiConverterOptionTypeFeeRate.lower(minFeeRate),$0
     )
 }
 }
     
-open func spliceOut(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, address: Address, spliceAmountSats: UInt64)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func spliceOut(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, address: Address, spliceAmountSats: UInt64, minFeeRate: FeeRate?)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
     uniffi_ldk_node_fn_method_node_splice_out(self.uniffiClonePointer(),
         FfiConverterTypeUserChannelId.lower(userChannelId),
         FfiConverterTypePublicKey.lower(counterpartyNodeId),
         FfiConverterTypeAddress.lower(address),
-        FfiConverterUInt64.lower(spliceAmountSats),$0
+        FfiConverterUInt64.lower(spliceAmountSats),
+        FfiConverterOptionTypeFeeRate.lower(minFeeRate),$0
     )
 }
 }
@@ -13628,10 +13630,10 @@ private var initializationResult: InitializationResult = {
     if (uniffi_ldk_node_checksum_method_node_sign_message() != 49319) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_splice_in() != 46431) {
+    if (uniffi_ldk_node_checksum_method_node_splice_in() != 40770) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_splice_out() != 22115) {
+    if (uniffi_ldk_node_checksum_method_node_splice_out() != 759) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ldk_node_checksum_method_node_spontaneous_payment() != 37403) {
