@@ -290,6 +290,8 @@ impl ElectrumChainSource {
 		{
 			let mut locked_node_metrics = self.node_metrics.write().unwrap();
 			locked_node_metrics.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt;
+			locked_node_metrics.latest_fee_rate_cache =
+				self.fee_estimator.fee_rate_cache_snapshot();
 			write_node_metrics(
 				&*locked_node_metrics,
 				Arc::clone(&self.kv_store),

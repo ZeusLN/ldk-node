@@ -1216,6 +1216,9 @@ fn build_with_store_internal(
 	};
 	let tx_broadcaster = Arc::new(TransactionBroadcaster::new(Arc::clone(&logger)));
 	let fee_estimator = Arc::new(OnchainFeeEstimator::new());
+	// Start from the estimates of the previous run, so that a node starting without a reachable
+	// chain source doesn't have LDK act on the hardcoded fallback rates.
+	fee_estimator.seed_fee_rate_cache(&node_metrics.read().unwrap().latest_fee_rate_cache);
 
 	let payment_store = match io::utils::read_payments(Arc::clone(&kv_store), Arc::clone(&logger)) {
 		Ok(payments) => Arc::new(PaymentStore::new(
