@@ -2490,6 +2490,30 @@ fn start_without_reachable_chain_source() {
 	assert!(status.is_running);
 	assert_eq!(status.latest_fee_rate_cache_update_timestamp, None);
 
+	// Spends that would rely on our own estimate fail while only fallback rates are available.
+	let address = node.onchain_payment().new_address().unwrap();
+	assert_eq!(
+		node.onchain_payment().send_to_address(&address, 100_000, None),
+		Err(NodeError::FeerateEstimationUpdateFailed)
+	);
+	assert_eq!(
+		node.onchain_payment().send_all_to_address(&address, false, None),
+		Err(NodeError::FeerateEstimationUpdateFailed)
+	);
+	let peer_id = node.node_id();
+	let peer_address = node.listening_addresses().unwrap().first().unwrap().clone();
+	assert_eq!(
+		node.open_channel(peer_id, peer_address, 100_000, None, None),
+		Err(NodeError::FeerateEstimationUpdateFailed)
+	);
+	// An explicit fee rate doesn't need the estimate, so this gets past the gate and fails on
+	// the empty wallet instead.
+	let fee_rate = bitcoin::FeeRate::from_sat_per_kwu(500);
+	assert_eq!(
+		node.onchain_payment().send_to_address(&address, 100_000, Some(fee_rate)),
+		Err(NodeError::InsufficientFunds)
+	);
+
 	node.stop().unwrap();
 	assert!(!node.status().is_running);
 }

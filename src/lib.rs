@@ -253,7 +253,7 @@ impl Node {
 		// in the background until the first update succeeds; the sync loop takes over from there.
 		let chain_source = Arc::clone(&self.chain_source);
 		match self.runtime.block_on(async move { chain_source.update_fee_rate_estimates().await }) {
-			Ok(()) => {},
+			Ok(()) => self.fee_estimator.set_awaiting_first_update(false),
 			Err(e @ Error::FeerateEstimationUpdateFailed)
 			| Err(e @ Error::FeerateEstimationUpdateTimeout) => {
 				log_error!(
@@ -261,7 +261,11 @@ impl Node {
 					"Failed to update fee rate estimates on startup, continuing with fallback rates: {}",
 					e
 				);
+				// Until an update succeeds, sends, channel opens and splices that rely on our
+				// estimate fail instead of using a fallback rate.
+				self.fee_estimator.set_awaiting_first_update(true);
 				let chain_source = Arc::clone(&self.chain_source);
+				let retry_fee_estimator = Arc::clone(&self.fee_estimator);
 				let retry_logger = Arc::clone(&self.logger);
 				let mut stop_retry = self.stop_sender.subscribe();
 				self.runtime.spawn_cancellable_background_task(async move {
@@ -273,6 +277,7 @@ impl Node {
 						}
 						match chain_source.update_fee_rate_estimates().await {
 							Ok(()) => {
+								retry_fee_estimator.set_awaiting_first_update(false);
 								log_info!(
 									retry_logger,
 									"Updated fee rate estimates after the failed startup update."
@@ -1161,6 +1166,7 @@ impl Node {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
+		self.fee_estimator.ensure_estimates_available()?;
 
 		let peer_info = PeerInfo { node_id, address };
 
@@ -1462,6 +1468,7 @@ impl Node {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
+		self.fee_estimator.ensure_estimates_available()?;
 
 		// For fund_max, don't subtract any anchor reserve — the user wants
 		// maximum channel capacity. Existing wallet UTXOs or future deposits
@@ -1505,6 +1512,8 @@ impl Node {
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		splice_amount_sats: u64,
 	) -> Result<(), Error> {
+		self.fee_estimator.ensure_estimates_available()?;
+
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
@@ -1622,6 +1631,8 @@ impl Node {
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: &Address,
 		splice_amount_sats: u64,
 	) -> Result<(), Error> {
+		self.fee_estimator.ensure_estimates_available()?;
+
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =

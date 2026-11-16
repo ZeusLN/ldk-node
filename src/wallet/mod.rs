@@ -477,6 +477,9 @@ impl Wallet {
 		self.parse_and_validate_address(&address)?;
 
 		// Use the set fee_rate or default to fee estimation.
+		if fee_rate.is_none() {
+			self.fee_estimator.ensure_estimates_available()?;
+		}
 		let confirmation_target = ConfirmationTarget::OnchainPayment;
 		let fee_rate =
 			fee_rate.unwrap_or_else(|| self.fee_estimator.estimate_fee_rate(confirmation_target));
