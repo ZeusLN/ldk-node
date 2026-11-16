@@ -2510,7 +2510,7 @@ fn start_without_reachable_chain_source() {
 	// the empty wallet instead.
 	let fee_rate = bitcoin::FeeRate::from_sat_per_kwu(500);
 	assert_eq!(
-		node.onchain_payment().send_to_address(&address, 100_000, Some(fee_rate)),
+		node.onchain_payment().send_to_address(&address, 100_000, Some(fee_rate.into())),
 		Err(NodeError::InsufficientFunds)
 	);
 
