@@ -14,6 +14,7 @@ use lightning::chain::chaininterface::{
 	ConfirmationTarget as LdkConfirmationTarget, FeeEstimator as LdkFeeEstimator,
 	FEERATE_FLOOR_SATS_PER_KW,
 };
+use lightning::impl_writeable_tlv_based;
 
 use crate::Error;
 
@@ -26,6 +27,44 @@ pub(crate) enum ConfirmationTarget {
 	/// Targets used by LDK.
 	Lightning(LdkConfirmationTarget),
 }
+
+impl ConfirmationTarget {
+	// The identifier under which we persist a target's fee rate. These are stored, so an
+	// identifier must never be reused for a different target.
+	fn persistence_id(&self) -> u8 {
+		match self {
+			Self::OnchainPayment => 0,
+			Self::ChannelFunding => 1,
+			Self::Lightning(ldk_target) => match ldk_target {
+				LdkConfirmationTarget::MaximumFeeEstimate => 2,
+				LdkConfirmationTarget::UrgentOnChainSweep => 3,
+				LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee => 4,
+				LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee => 5,
+				LdkConfirmationTarget::AnchorChannelFee => 6,
+				LdkConfirmationTarget::NonAnchorChannelFee => 7,
+				LdkConfirmationTarget::ChannelCloseMinimum => 8,
+				LdkConfirmationTarget::OutputSpendingFee => 9,
+			},
+		}
+	}
+
+	fn from_persistence_id(id: u8) -> Option<Self> {
+		get_all_conf_targets().into_iter().find(|target| target.persistence_id() == id)
+	}
+}
+
+/// A fee rate estimate as we persist it, so that a node starting without a reachable chain source
+/// can use the estimates of its previous run rather than the hardcoded fallback rates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PersistedFeeRate {
+	target_id: u8,
+	sat_per_kwu: u64,
+}
+
+impl_writeable_tlv_based!(PersistedFeeRate, {
+	(0, target_id, required),
+	(2, sat_per_kwu, required),
+});
 
 pub(crate) trait FeeEstimator {
 	fn estimate_fee_rate(&self, confirmation_target: ConfirmationTarget) -> FeeRate;
@@ -50,6 +89,36 @@ impl OnchainFeeEstimator {
 		let fee_rate_cache = RwLock::new(HashMap::new());
 		let awaiting_first_update = AtomicBool::new(false);
 		Self { fee_rate_cache, awaiting_first_update }
+	}
+
+	// Returns the current cache for persistence. Empty if we never retrieved any estimates.
+	pub(crate) fn fee_rate_cache_snapshot(&self) -> Vec<PersistedFeeRate> {
+		let locked_fee_rate_cache = self.fee_rate_cache.read().unwrap();
+		let mut snapshot = locked_fee_rate_cache
+			.iter()
+			.map(|(target, fee_rate)| PersistedFeeRate {
+				target_id: target.persistence_id(),
+				sat_per_kwu: fee_rate.to_sat_per_kwu(),
+			})
+			.collect::<Vec<_>>();
+		snapshot.sort_by_key(|entry| entry.target_id);
+		snapshot
+	}
+
+	// Fills the cache with the estimates persisted by a previous run. They only serve until the
+	// first update of this run, and don't count as one: `ensure_estimates_available` keeps
+	// failing after a failed startup update, as these rates may be arbitrarily old.
+	pub(crate) fn seed_fee_rate_cache(&self, persisted: &[PersistedFeeRate]) {
+		let mut locked_fee_rate_cache = self.fee_rate_cache.write().unwrap();
+		if !locked_fee_rate_cache.is_empty() {
+			return;
+		}
+		for entry in persisted {
+			// Skip targets we don't know, e.g., ones written by a newer version.
+			if let Some(target) = ConfirmationTarget::from_persistence_id(entry.target_id) {
+				locked_fee_rate_cache.insert(target, FeeRate::from_sat_per_kwu(entry.sat_per_kwu));
+			}
+		}
 	}
 
 	pub(crate) fn set_awaiting_first_update(&self, awaiting: bool) {
@@ -243,6 +312,81 @@ mod tests {
 		assert_eq!(
 			estimator.estimate_fee_rate(ConfirmationTarget::OnchainPayment),
 			FeeRate::from_sat_per_kwu(750)
+		);
+	}
+
+	#[test]
+	fn persistence_ids_are_unique_and_round_trip() {
+		let targets = get_all_conf_targets();
+		let mut ids = targets.iter().map(|t| t.persistence_id()).collect::<Vec<_>>();
+		ids.sort();
+		ids.dedup();
+		assert_eq!(ids.len(), targets.len());
+		for target in targets {
+			assert_eq!(
+				ConfirmationTarget::from_persistence_id(target.persistence_id()),
+				Some(target)
+			);
+		}
+		assert_eq!(ConfirmationTarget::from_persistence_id(200), None);
+	}
+
+	#[test]
+	fn snapshot_seeds_a_new_estimator() {
+		let estimator = OnchainFeeEstimator::new();
+		assert!(estimator.fee_rate_cache_snapshot().is_empty());
+
+		let mut update = HashMap::new();
+		for (i, target) in get_all_conf_targets().into_iter().enumerate() {
+			update.insert(target, FeeRate::from_sat_per_kwu(1000 + i as u64));
+		}
+		estimator.set_fee_rate_cache(update);
+		let snapshot = estimator.fee_rate_cache_snapshot();
+		assert_eq!(snapshot.len(), 10);
+
+		let restarted = OnchainFeeEstimator::new();
+		restarted.seed_fee_rate_cache(&snapshot);
+		for target in get_all_conf_targets() {
+			assert_eq!(restarted.estimate_fee_rate(target), estimator.estimate_fee_rate(target));
+		}
+		assert_eq!(restarted.fee_rate_cache_snapshot(), snapshot);
+	}
+
+	#[test]
+	fn seeding_skips_unknown_targets_and_keeps_fresh_estimates() {
+		let estimator = OnchainFeeEstimator::new();
+		let persisted = vec![
+			PersistedFeeRate { target_id: 0, sat_per_kwu: 2000 },
+			PersistedFeeRate { target_id: 200, sat_per_kwu: 9000 },
+		];
+		estimator.seed_fee_rate_cache(&persisted);
+		assert_eq!(
+			estimator.estimate_fee_rate(ConfirmationTarget::OnchainPayment),
+			FeeRate::from_sat_per_kwu(2000)
+		);
+		// A target missing from the persisted set still uses its fallback.
+		assert_eq!(
+			estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding),
+			FeeRate::from_sat_per_kwu(1000)
+		);
+
+		// Seeding never replaces estimates we already hold.
+		let newer = vec![PersistedFeeRate { target_id: 0, sat_per_kwu: 4000 }];
+		estimator.seed_fee_rate_cache(&newer);
+		assert_eq!(
+			estimator.estimate_fee_rate(ConfirmationTarget::OnchainPayment),
+			FeeRate::from_sat_per_kwu(2000)
+		);
+	}
+
+	#[test]
+	fn seeded_estimates_do_not_open_the_spend_gate() {
+		let estimator = OnchainFeeEstimator::new();
+		estimator.seed_fee_rate_cache(&[PersistedFeeRate { target_id: 0, sat_per_kwu: 2000 }]);
+		estimator.set_awaiting_first_update(true);
+		assert_eq!(
+			estimator.ensure_estimates_available(),
+			Err(Error::FeerateEstimationUpdateFailed)
 		);
 	}
 

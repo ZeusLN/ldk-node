@@ -2364,6 +2364,8 @@ pub(crate) struct NodeMetrics {
 	latest_pathfinding_scores_sync_timestamp: Option<u64>,
 	latest_node_announcement_broadcast_timestamp: Option<u64>,
 	latest_channel_monitor_archival_height: Option<u32>,
+	// The fee rate estimates of the latest successful update, used to seed the cache on startup.
+	latest_fee_rate_cache: Vec<fee_estimator::PersistedFeeRate>,
 }
 
 impl Default for NodeMetrics {
@@ -2376,6 +2378,7 @@ impl Default for NodeMetrics {
 			latest_pathfinding_scores_sync_timestamp: None,
 			latest_node_announcement_broadcast_timestamp: None,
 			latest_channel_monitor_archival_height: None,
+			latest_fee_rate_cache: Vec::new(),
 		}
 	}
 }
@@ -2385,6 +2388,7 @@ impl_writeable_tlv_based!(NodeMetrics, {
 	(1, latest_pathfinding_scores_sync_timestamp, option),
 	(2, latest_onchain_wallet_sync_timestamp, option),
 	(4, latest_fee_rate_cache_update_timestamp, option),
+	(5, latest_fee_rate_cache, optional_vec),
 	(6, latest_rgs_snapshot_timestamp, option),
 	(8, latest_node_announcement_broadcast_timestamp, option),
 	(10, latest_channel_monitor_archival_height, option),
@@ -2408,4 +2412,59 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 			.count() as u64
 			* anchor_channels_config.per_channel_reserve_sats
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use std::collections::HashMap;
+
+	use bitcoin::FeeRate;
+	use lightning::util::ser::{Readable, Writeable};
+
+	use super::*;
+
+	#[test]
+	fn node_metrics_persist_the_fee_rate_cache() {
+		let estimator = OnchainFeeEstimator::new();
+		let mut update = HashMap::new();
+		update.insert(ConfirmationTarget::OnchainPayment, FeeRate::from_sat_per_kwu(2500));
+		update.insert(ConfirmationTarget::ChannelFunding, FeeRate::from_sat_per_kwu(1500));
+		estimator.set_fee_rate_cache(update);
+
+		let mut metrics = NodeMetrics::default();
+		metrics.latest_fee_rate_cache_update_timestamp = Some(1_700_000_000);
+		metrics.latest_fee_rate_cache = estimator.fee_rate_cache_snapshot();
+		assert_eq!(metrics.latest_fee_rate_cache.len(), 2);
+
+		let read = NodeMetrics::read(&mut &metrics.encode()[..]).unwrap();
+		assert_eq!(read, metrics);
+
+		let restarted = OnchainFeeEstimator::new();
+		restarted.seed_fee_rate_cache(&read.latest_fee_rate_cache);
+		assert_eq!(
+			restarted.estimate_fee_rate(ConfirmationTarget::OnchainPayment),
+			FeeRate::from_sat_per_kwu(2500)
+		);
+	}
+
+	#[test]
+	fn node_metrics_without_a_fee_rate_cache_still_read() {
+		// Metrics written before the cache was persisted carry no such field, which is also how
+		// an empty cache is written.
+		let mut metrics = NodeMetrics::default();
+		metrics.latest_fee_rate_cache_update_timestamp = Some(1_700_000_000);
+		let encoded = metrics.encode();
+
+		let mut with_cache = metrics.clone();
+		let estimator = OnchainFeeEstimator::new();
+		let mut update = HashMap::new();
+		update.insert(ConfirmationTarget::OnchainPayment, FeeRate::from_sat_per_kwu(2500));
+		estimator.set_fee_rate_cache(update);
+		with_cache.latest_fee_rate_cache = estimator.fee_rate_cache_snapshot();
+		assert!(with_cache.encode().len() > encoded.len());
+
+		let read = NodeMetrics::read(&mut &encoded[..]).unwrap();
+		assert!(read.latest_fee_rate_cache.is_empty());
+		assert_eq!(read.latest_fee_rate_cache_update_timestamp, Some(1_700_000_000));
+	}
 }
