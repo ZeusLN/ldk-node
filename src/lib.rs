@@ -127,6 +127,7 @@ pub use closed_channel::ClosedChannelDetails;
 use config::{
 	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
 	NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
+	STARTUP_FEE_RATE_RETRY_INITIAL_DELAY_SECS, STARTUP_FEE_RATE_RETRY_MAX_DELAY_SECS,
 };
 use connection::ConnectionManager;
 pub use error::Error as NodeError;
@@ -246,9 +247,59 @@ impl Node {
 			e
 		})?;
 
-		// Block to ensure we update our fee rate cache once on startup
+		// Block to ensure we update our fee rate cache once on startup. Upstream fails the start
+		// when this update fails, so a node without network access (e.g. a phone with no signal)
+		// can't start at all. Instead we start on the fallback rates from `fee_estimator` and retry
+		// in the background until the first update succeeds; the sync loop takes over from there.
 		let chain_source = Arc::clone(&self.chain_source);
-		self.runtime.block_on(async move { chain_source.update_fee_rate_estimates().await })?;
+		match self.runtime.block_on(async move { chain_source.update_fee_rate_estimates().await }) {
+			Ok(()) => self.fee_estimator.set_awaiting_first_update(false),
+			Err(e @ Error::FeerateEstimationUpdateFailed)
+			| Err(e @ Error::FeerateEstimationUpdateTimeout) => {
+				log_error!(
+					self.logger,
+					"Failed to update fee rate estimates on startup, continuing with fallback rates: {}",
+					e
+				);
+				// Until an update succeeds, sends, channel opens and splices that rely on our
+				// estimate fail instead of using a fallback rate.
+				self.fee_estimator.set_awaiting_first_update(true);
+				let chain_source = Arc::clone(&self.chain_source);
+				let retry_fee_estimator = Arc::clone(&self.fee_estimator);
+				let retry_logger = Arc::clone(&self.logger);
+				let mut stop_retry = self.stop_sender.subscribe();
+				self.runtime.spawn_cancellable_background_task(async move {
+					let mut delay = Duration::from_secs(STARTUP_FEE_RATE_RETRY_INITIAL_DELAY_SECS);
+					loop {
+						tokio::select! {
+							_ = stop_retry.changed() => return,
+							_ = tokio::time::sleep(delay) => {},
+						}
+						match chain_source.update_fee_rate_estimates().await {
+							Ok(()) => {
+								retry_fee_estimator.set_awaiting_first_update(false);
+								log_info!(
+									retry_logger,
+									"Updated fee rate estimates after the failed startup update."
+								);
+								return;
+							},
+							Err(e) => {
+								log_debug!(
+									retry_logger,
+									"Retrying fee rate estimate update: {}",
+									e
+								);
+								delay = (delay * 2).min(Duration::from_secs(
+									STARTUP_FEE_RATE_RETRY_MAX_DELAY_SECS,
+								));
+							},
+						}
+					}
+				});
+			},
+			Err(e) => return Err(e),
+		}
 
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
@@ -1115,6 +1166,7 @@ impl Node {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
+		self.fee_estimator.ensure_estimates_available()?;
 
 		let peer_info = PeerInfo { node_id, address };
 
@@ -1416,6 +1468,7 @@ impl Node {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
 		}
+		self.fee_estimator.ensure_estimates_available()?;
 
 		// For fund_max, don't subtract any anchor reserve — the user wants
 		// maximum channel capacity. Existing wallet UTXOs or future deposits
@@ -1459,6 +1512,8 @@ impl Node {
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		splice_amount_sats: u64,
 	) -> Result<(), Error> {
+		self.fee_estimator.ensure_estimates_available()?;
+
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
@@ -1576,6 +1631,8 @@ impl Node {
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: &Address,
 		splice_amount_sats: u64,
 	) -> Result<(), Error> {
+		self.fee_estimator.ensure_estimates_available()?;
+
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =

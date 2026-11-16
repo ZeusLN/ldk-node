@@ -6,6 +6,7 @@
 // accordance with one or both of these licenses.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
 use bitcoin::FeeRate;
@@ -13,6 +14,8 @@ use lightning::chain::chaininterface::{
 	ConfirmationTarget as LdkConfirmationTarget, FeeEstimator as LdkFeeEstimator,
 	FEERATE_FLOOR_SATS_PER_KW,
 };
+
+use crate::Error;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum ConfirmationTarget {
@@ -36,12 +39,32 @@ impl From<LdkConfirmationTarget> for ConfirmationTarget {
 
 pub(crate) struct OnchainFeeEstimator {
 	fee_rate_cache: RwLock<HashMap<ConfirmationTarget, FeeRate>>,
+	// Set when the node started although its startup fee rate update failed, and cleared by the
+	// next update that succeeds. While set, `estimate_fee_rate` may return the hardcoded
+	// fallback rates.
+	awaiting_first_update: AtomicBool,
 }
 
 impl OnchainFeeEstimator {
 	pub(crate) fn new() -> Self {
 		let fee_rate_cache = RwLock::new(HashMap::new());
-		Self { fee_rate_cache }
+		let awaiting_first_update = AtomicBool::new(false);
+		Self { fee_rate_cache, awaiting_first_update }
+	}
+
+	pub(crate) fn set_awaiting_first_update(&self, awaiting: bool) {
+		self.awaiting_first_update.store(awaiting, Ordering::Release);
+	}
+
+	// Fails while the node runs on fallback rates because its startup fee rate update failed.
+	// User-initiated wallet spends that rely on our estimate call this first: nothing bumps
+	// their fee later, so they must not be built on a hardcoded rate.
+	pub(crate) fn ensure_estimates_available(&self) -> Result<(), Error> {
+		if self.awaiting_first_update.load(Ordering::Acquire) {
+			Err(Error::FeerateEstimationUpdateFailed)
+		} else {
+			Ok(())
+		}
 	}
 
 	// Updates the fee rate cache and returns if the new values changed.
@@ -49,6 +72,7 @@ impl OnchainFeeEstimator {
 		&self, fee_rate_cache_update: HashMap<ConfirmationTarget, FeeRate>,
 	) -> bool {
 		let mut locked_fee_rate_cache = self.fee_rate_cache.write().unwrap();
+		self.awaiting_first_update.store(false, Ordering::Release);
 		if fee_rate_cache_update != *locked_fee_rate_cache {
 			*locked_fee_rate_cache = fee_rate_cache_update;
 			true
@@ -189,5 +213,44 @@ pub(crate) fn apply_post_estimation_adjustments(
 			FeeRate::from_sat_per_kwu(slightly_bump)
 		},
 		_ => estimated_rate,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn estimates_unavailable_until_first_update() {
+		let estimator = OnchainFeeEstimator::new();
+		assert_eq!(estimator.ensure_estimates_available(), Ok(()));
+
+		estimator.set_awaiting_first_update(true);
+		assert_eq!(
+			estimator.ensure_estimates_available(),
+			Err(Error::FeerateEstimationUpdateFailed)
+		);
+		// The fallback rates still serve LDK while we wait.
+		assert_eq!(
+			estimator.estimate_fee_rate(ConfirmationTarget::OnchainPayment),
+			FeeRate::from_sat_per_kwu(5000)
+		);
+
+		let mut update = HashMap::new();
+		update.insert(ConfirmationTarget::OnchainPayment, FeeRate::from_sat_per_kwu(750));
+		estimator.set_fee_rate_cache(update);
+		assert_eq!(estimator.ensure_estimates_available(), Ok(()));
+		assert_eq!(
+			estimator.estimate_fee_rate(ConfirmationTarget::OnchainPayment),
+			FeeRate::from_sat_per_kwu(750)
+		);
+	}
+
+	#[test]
+	fn clearing_the_flag_without_a_cache_update() {
+		let estimator = OnchainFeeEstimator::new();
+		estimator.set_awaiting_first_update(true);
+		estimator.set_awaiting_first_update(false);
+		assert_eq!(estimator.ensure_estimates_available(), Ok(()));
 	}
 }
