@@ -1104,8 +1104,9 @@ impl ArcedNodeBuilder {
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	pub fn build_with_vss_store_and_header_provider(
 		&self, node_entropy: Arc<NodeEntropy>, vss_url: String, store_id: String,
-		header_provider: Arc<dyn VssHeaderProvider>,
+		header_provider: Arc<dyn crate::ffi::VssHeaderProvider>,
 	) -> Result<Arc<Node>, BuildError> {
+		let header_provider = Arc::new(crate::ffi::VssHeaderProviderAdapter(header_provider));
 		self.inner
 			.read()
 			.unwrap()
@@ -1152,8 +1153,9 @@ impl ArcedNodeBuilder {
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	pub fn build_with_dual_store_and_header_provider(
 		&self, node_entropy: Arc<NodeEntropy>, vss_url: String, store_id: String,
-		header_provider: Arc<dyn VssHeaderProvider>,
+		header_provider: Arc<dyn crate::ffi::VssHeaderProvider>,
 	) -> Result<Arc<Node>, BuildError> {
+		let header_provider = Arc::new(crate::ffi::VssHeaderProviderAdapter(header_provider));
 		self.inner
 			.read()
 			.unwrap()
