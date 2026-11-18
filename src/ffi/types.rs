@@ -10,6 +10,7 @@
 //
 // Make sure to add any re-exported items that need to be used in uniffi below.
 
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -43,7 +44,6 @@ pub use lightning_liquidity::lsps7::msgs::{
 };
 pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning_types::string::UntrustedString;
-pub use vss_client::headers::{VssHeaderProvider, VssHeaderProviderError};
 
 use crate::builder::sanitize_alias;
 pub use crate::config::{
@@ -60,6 +60,100 @@ pub use crate::payment::store::{
 };
 pub use crate::payment::{QrPaymentResult, RouteHints};
 use crate::{hex_utils, SocketAddress, UniffiCustomTypeConverter, UserChannelId};
+
+/// Provides the HTTP headers for each request made to VSS.
+///
+/// `get_headers` is called before every VSS request (including retries) with the serialized
+/// request body, so an implementation can sign a fresh authorization header per request instead
+/// of handing the node one fixed header that expires. It can be implemented in Kotlin, Swift or
+/// Python and passed to [`ArcedNodeBuilder::build_with_vss_store_and_header_provider`] or
+/// [`ArcedNodeBuilder::build_with_dual_store_and_header_provider`].
+///
+/// This mirrors [`vss_client::headers::VssHeaderProvider`], which UniFFI cannot expose to
+/// foreign code itself because its error type is defined in another crate.
+///
+/// [`ArcedNodeBuilder::build_with_vss_store_and_header_provider`]: crate::builder::ArcedNodeBuilder::build_with_vss_store_and_header_provider
+/// [`ArcedNodeBuilder::build_with_dual_store_and_header_provider`]: crate::builder::ArcedNodeBuilder::build_with_dual_store_and_header_provider
+#[async_trait::async_trait]
+pub trait VssHeaderProvider: Send + Sync {
+	/// Returns the HTTP headers to be used for a VSS request whose serialized body is `request`.
+	async fn get_headers(
+		&self, request: Vec<u8>,
+	) -> Result<HashMap<String, String>, VssHeaderProviderError>;
+}
+
+/// Errors returned by a [`VssHeaderProvider`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VssHeaderProviderError {
+	/// Invalid data was encountered.
+	InvalidData {
+		/// The error message.
+		error: String,
+	},
+	/// An external request failed.
+	RequestError {
+		/// The error message.
+		error: String,
+	},
+	/// Authorization was refused.
+	AuthorizationError {
+		/// The error message.
+		error: String,
+	},
+	/// Any other error in the header provider.
+	InternalError {
+		/// The error message.
+		error: String,
+	},
+}
+
+impl std::fmt::Display for VssHeaderProviderError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::InvalidData { error } => write!(f, "invalid data: {}", error),
+			Self::RequestError { error } => {
+				write!(f, "error performing external request: {}", error)
+			},
+			Self::AuthorizationError { error } => write!(f, "authorization was refused: {}", error),
+			Self::InternalError { error } => write!(f, "internal error: {}", error),
+		}
+	}
+}
+
+impl std::error::Error for VssHeaderProviderError {}
+
+// An exception thrown by a foreign implementation that is not a `VssHeaderProviderError`
+// arrives here. Without this conversion UniFFI panics, which aborts the process.
+impl From<uniffi::UnexpectedUniFFICallbackError> for VssHeaderProviderError {
+	fn from(e: uniffi::UnexpectedUniFFICallbackError) -> Self {
+		Self::InternalError { error: e.reason }
+	}
+}
+
+impl From<VssHeaderProviderError> for vss_client::headers::VssHeaderProviderError {
+	fn from(e: VssHeaderProviderError) -> Self {
+		match e {
+			VssHeaderProviderError::InvalidData { error } => Self::InvalidData { error },
+			VssHeaderProviderError::RequestError { error } => Self::RequestError { error },
+			VssHeaderProviderError::AuthorizationError { error } => {
+				Self::AuthorizationError { error }
+			},
+			VssHeaderProviderError::InternalError { error } => Self::InternalError { error },
+		}
+	}
+}
+
+/// Hands the VSS client's per-request header calls to a [`VssHeaderProvider`].
+pub(crate) struct VssHeaderProviderAdapter(pub(crate) Arc<dyn VssHeaderProvider>);
+
+#[async_trait::async_trait]
+impl vss_client::headers::VssHeaderProvider for VssHeaderProviderAdapter {
+	async fn get_headers(
+		&self, request: &[u8],
+	) -> Result<HashMap<String, String>, vss_client::headers::VssHeaderProviderError> {
+		self.0.get_headers(request.to_vec()).await.map_err(Into::into)
+	}
+}
 
 impl UniffiCustomTypeConverter for PublicKey {
 	type Builtin = String;
@@ -1696,5 +1790,128 @@ mod tests {
 		assert_eq!(ldk_invoice.encode(), wrapped_invoice.encode());
 
 		assert_eq!(ldk_invoice.signable_hash().to_vec(), wrapped_invoice.signable_hash());
+	}
+
+	// A provider that signs a different header on every call, as one that puts the current time
+	// in an authorization header does.
+	struct CountingHeaderProvider {
+		calls: std::sync::atomic::AtomicUsize,
+	}
+
+	#[async_trait::async_trait]
+	impl VssHeaderProvider for CountingHeaderProvider {
+		async fn get_headers(
+			&self, _request: Vec<u8>,
+		) -> Result<HashMap<String, String>, VssHeaderProviderError> {
+			let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			Ok(HashMap::from([("Authorization".to_string(), format!("header-{}", call))]))
+		}
+	}
+
+	// Serves `requests` HTTP requests with an empty 200 response (a valid, empty protobuf reply
+	// for every VSS endpoint) and returns the base URL and the `Authorization` header each
+	// request carried.
+	fn spawn_recording_server(
+		requests: usize,
+	) -> (String, std::thread::JoinHandle<Vec<Option<String>>>) {
+		use std::io::{BufRead, BufReader, Read, Write};
+
+		let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+		let base_url = format!("http://{}", listener.local_addr().unwrap());
+		let handle = std::thread::spawn(move || {
+			let mut seen = Vec::new();
+			for stream in listener.incoming().take(requests) {
+				let mut stream = stream.unwrap();
+				let mut reader = BufReader::new(stream.try_clone().unwrap());
+				let mut authorization = None;
+				let mut content_length = 0;
+				loop {
+					let mut line = String::new();
+					reader.read_line(&mut line).unwrap();
+					let line = line.trim_end();
+					if line.is_empty() {
+						break;
+					}
+					if let Some((name, value)) = line.split_once(':') {
+						let value = value.trim().to_string();
+						if name.eq_ignore_ascii_case("authorization") {
+							authorization = Some(value);
+						} else if name.eq_ignore_ascii_case("content-length") {
+							content_length = value.parse().unwrap();
+						}
+					}
+				}
+				let mut body = vec![0u8; content_length];
+				reader.read_exact(&mut body).unwrap();
+				seen.push(authorization);
+				stream
+					.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+					.unwrap();
+			}
+			seen
+		});
+		(base_url, handle)
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn vss_header_provider_is_asked_for_headers_on_every_request() {
+		use vss_client::client::VssClient;
+		use vss_client::types::{ListKeyVersionsRequest, PutObjectRequest};
+		use vss_client::util::retry::{ExponentialBackoffRetryPolicy, RetryPolicy};
+
+		let (base_url, server) = spawn_recording_server(3);
+		let provider = Arc::new(CountingHeaderProvider { calls: Default::default() });
+		let adapter = Arc::new(VssHeaderProviderAdapter(provider.clone()));
+		let retry_policy =
+			ExponentialBackoffRetryPolicy::new(Duration::from_millis(10)).with_max_attempts(1);
+		let client = VssClient::new_with_headers(base_url, retry_policy, adapter);
+
+		let put = PutObjectRequest { store_id: "store".to_string(), ..Default::default() };
+		client.put_object(&put).await.unwrap();
+		client.put_object(&put).await.unwrap();
+		let list = ListKeyVersionsRequest { store_id: "store".to_string(), ..Default::default() };
+		client.list_key_versions(&list).await.unwrap();
+
+		assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+		let seen = server.join().unwrap();
+		assert_eq!(
+			seen,
+			vec![
+				Some("header-0".to_string()),
+				Some("header-1".to_string()),
+				Some("header-2".to_string())
+			]
+		);
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn vss_header_provider_errors_reach_the_vss_client() {
+		struct RefusingHeaderProvider;
+
+		#[async_trait::async_trait]
+		impl VssHeaderProvider for RefusingHeaderProvider {
+			async fn get_headers(
+				&self, _request: Vec<u8>,
+			) -> Result<HashMap<String, String>, VssHeaderProviderError> {
+				Err(VssHeaderProviderError::AuthorizationError { error: "expired".to_string() })
+			}
+		}
+
+		let adapter = VssHeaderProviderAdapter(Arc::new(RefusingHeaderProvider));
+		let err = vss_client::headers::VssHeaderProvider::get_headers(&adapter, &[]).await;
+		assert!(matches!(
+			err,
+			Err(vss_client::headers::VssHeaderProviderError::AuthorizationError { ref error })
+				if error == "expired"
+		));
+	}
+
+	#[test]
+	fn unexpected_foreign_errors_become_internal_errors() {
+		let e = uniffi::UnexpectedUniFFICallbackError::new("RuntimeException: boom");
+		assert_eq!(
+			VssHeaderProviderError::from(e),
+			VssHeaderProviderError::InternalError { error: "RuntimeException: boom".to_string() }
+		);
 	}
 }

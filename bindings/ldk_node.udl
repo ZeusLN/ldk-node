@@ -444,18 +444,18 @@ enum BuildError {
 	"AsyncPaymentsConfigMismatch",
 };
 
-[Trait]
+[Trait, WithForeign]
 interface VssHeaderProvider {
 	[Async, Throws=VssHeaderProviderError]
-	record<string, string> get_headers([ByRef]sequence<u8> request);
+	record<string, string> get_headers(sequence<u8> request);
 };
 
 [Error]
-enum VssHeaderProviderError {
-	"InvalidData",
-	"RequestError",
-	"AuthorizationError",
-	"InternalError",
+interface VssHeaderProviderError {
+	InvalidData(string error);
+	RequestError(string error);
+	AuthorizationError(string error);
+	InternalError(string error);
 };
 
 [Enum]

@@ -1900,6 +1900,7 @@ dependencies = [
 name = "ldk-node"
 version = "0.8.0+git"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "bdk_chain",
  "bdk_electrum 0.24.1",
